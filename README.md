@@ -1,33 +1,51 @@
-# SecureShell Pro
+# 🛡️ SecureShell Pro
 
-SecureShell Pro is a desktop SSH workspace for managing remote hosts, private keys, reusable command snippets, terminal sessions, and encrypted LAN sync with the Android companion app.
+[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
+[![Platform: Linux · Windows](https://img.shields.io/badge/Platform-Linux%20·%20Windows-informational)]()
+[![Built with Tauri 2](https://img.shields.io/badge/Built%20with-Tauri%202-ffc131?logo=tauri&logoColor=white)]()
+[![Version](https://img.shields.io/badge/Version-0.4.0-brightgreen)]()
 
-The app is built for users who work across multiple servers and need a private, organized, local-first SSH environment. Connection data stays on the device by default, sensitive credentials are protected by the vault, and paired devices can sync over the local network without relying on a cloud account.
+A private, local-first desktop SSH workspace for managing remote hosts, private keys, reusable command snippets, terminal sessions, SFTP file transfers, and encrypted LAN sync — all without a cloud account.
 
-## Features
+---
 
-- Manage SSH hosts with labels, authentication settings, tags, and saved connection details.
-- Store SSH keys and host passwords in an encrypted local vault.
-- Open interactive terminal sessions with tabbed session management.
-- Save reusable command snippets and run them from the terminal.
-- Use runtime snippet variables such as `{{host}}` or `{{service}}` and fill them just before execution.
-- Organize snippets into folders and map snippets to specific hosts.
-- Pair with the Android app over LAN and sync hosts, keys, snippets, and groups.
-- Use QR-based pairing and local network discovery for device setup.
+## ✨ Features
 
-## Security Model
+| Feature | Description |
+|---------|-------------|
+| **Host Manager** | Organize SSH hosts with labels, groups, tags, color codes, and saved connection details. |
+| **Encrypted Vault** | Store SSH keys and passwords in an AES-256-GCM encrypted vault, protected by a master password derived with Argon2id. |
+| **Tabbed Terminal** | Open multiple interactive SSH sessions in a tabbed terminal powered by xterm.js with local shell support. |
+| **Command Snippets** | Save reusable command snippets, organize them into folders, and execute them directly in terminal sessions. |
+| **Snippet Variables** | Use runtime variables like `{{host}}` or `{{service}}` that prompt for values just before execution. |
+| **SFTP File Browser** | Browse, upload, download, rename, and manage remote files through an integrated dual-pane SFTP interface. |
+| **LAN Sync** | Pair with the Android companion app via QR code and sync hosts, keys, snippets, and groups over your local network. |
+| **SSH Key Management** | Import, manage, and auto-detect SSH keys from `~/.ssh` for seamless authentication. |
 
-SecureShell Pro uses a master-password-protected vault for sensitive SSH credentials. The vault stores encrypted secrets locally and requires unlock before protected values can be read or used.
+---
 
-LAN sync is designed for local trusted devices. Pairing establishes device trust, and sync transfers records between paired peers on the same network. The app does not require a hosted service for normal operation.
+## 🔐 Security Model
 
-## Development
+- **Vault encryption** — All sensitive credentials (passwords, private keys, passphrases) are encrypted at rest using **AES-256-GCM** with keys derived from a master password via **Argon2id**.
+- **Zero plaintext on disk** — The vault must be unlocked before any protected value can be read or used. Locking the vault clears the in-memory master key.
+- **LAN sync** — Pairing uses **X25519 key exchange** and **Noise protocol** for encrypted peer-to-peer communication. Mobile peers authenticate via **HMAC-SHA256 challenge-response**. No cloud relay or hosted service is involved.
+- **Local-first** — All connection data stays on the device by default. Nothing leaves the machine unless you explicitly pair and sync.
 
-### Requirements
+---
 
-- Node.js and npm
-- Rust and Cargo
-- Tauri system dependencies for your Linux distribution
+## 🚀 Getting Started
+
+### Prerequisites
+
+- **Node.js** (v20+) and **npm**
+- **Rust** and **Cargo** (stable toolchain)
+- **Tauri 2 system dependencies** for your Linux distribution:
+  ```bash
+  # Ubuntu / Debian
+  sudo apt install libwebkit2gtk-4.1-dev libappindicator3-dev \
+    librsvg2-dev patchelf libssl-dev libdbus-1-dev \
+    libgtk-3-dev libsoup-3.0-dev javascriptcoregtk-4.1
+  ```
 
 ### Install Dependencies
 
@@ -35,32 +53,87 @@ LAN sync is designed for local trusted devices. Pairing establishes device trust
 npm install
 ```
 
-### Run In Development
+### Run in Development
 
 ```bash
 npm run dev
 ```
 
-### Build Debian Package
+### Build Packages
 
 ```bash
+# Debian / Ubuntu (.deb)
 npm run build:deb
+
+# AppImage
+npm run build:appimage
+
+# All targets
+npm run build:all
 ```
 
-The generated `.deb` package is written under:
+Build output is written to `src-tauri/target/release/bundle/`.
+
+---
+
+## 📁 Project Structure
 
 ```text
-src-tauri/target/release/bundle/deb/
+secureshell-pro/
+├── src/                        # Frontend (HTML, CSS, JavaScript)
+│   ├── index.html              # App shell
+│   ├── js/
+│   │   ├── api.js              # Tauri IPC wrapper
+│   │   ├── app.js              # Entry point & routing
+│   │   ├── titlebar.js         # Custom window titlebar
+│   │   ├── components/         # Reusable UI components
+│   │   ├── utils/              # Helpers, icons, clipboard, themes
+│   │   └── views/              # View modules (hosts, terminal, sftp, etc.)
+│   ├── styles/                 # CSS stylesheets
+│   └── assets/                 # Fonts, icons, xterm.js
+├── src-tauri/                  # Tauri & Rust backend
+│   ├── src/
+│   │   ├── main.rs             # App entry
+│   │   ├── lib.rs              # Tauri plugin setup & command registration
+│   │   ├── vault.rs            # Vault encrypt / decrypt / init / lock
+│   │   ├── crypto.rs           # AES-GCM, Argon2id, key derivation
+│   │   ├── db/                 # SQLite database & migrations
+│   │   ├── commands/           # Tauri IPC command handlers
+│   │   ├── ssh/                # SSH session management (PTY)
+│   │   ├── sftp/               # SFTP session management
+│   │   └── sync/               # LAN discovery, pairing, peer sync
+│   ├── Cargo.toml
+│   └── tauri.conf.json
+├── .github/workflows/          # CI: build & release (Linux .deb + Windows .exe)
+└── package.json
 ```
 
-## Project Structure
+---
 
-```text
-src/             Frontend HTML, CSS, and JavaScript
-src-tauri/       Tauri and Rust backend
-docs/            Sync and vault format notes
-```
+## ⌨️ Keyboard Shortcuts
 
-## License
+| Shortcut | Action |
+|----------|--------|
+| `Ctrl+1` | Switch to Hosts |
+| `Ctrl+2` | Switch to Terminal |
+| `Ctrl+3` | Switch to Snippets |
+| `Ctrl+4` | Switch to Keys |
+| `Ctrl+5` | Switch to SFTP |
+| `Ctrl+,` | Switch to Settings |
+| `Ctrl+R` / `F5` | Reload app |
 
-Private project.
+---
+
+## 📦 CI / CD
+
+Pushing a version tag (`v*`) triggers the GitHub Actions workflow which:
+
+1. Builds a `.deb` package on Ubuntu 22.04
+2. Builds a `.exe` (NSIS installer) on Windows
+3. Creates a draft GitHub Release with both artifacts attached
+
+---
+
+## 📄 License
+
+This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
