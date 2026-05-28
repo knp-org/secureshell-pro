@@ -1,0 +1,671 @@
+/* ═══════════════════════════════════════════════════════════
+   Hosts View — full-page list
+   ═══════════════════════════════════════════════════════════ */
+
+#view-hosts {
+    display: none;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+}
+#view-hosts.active {
+    display: flex;
+}
+
+.hosts-page {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--bg-primary);
+}
+
+.hosts-page-header {
+    flex-shrink: 0;
+    padding: 20px 28px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    background: var(--bg-secondary);
+}
+
+.hosts-page-header h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.hosts-page-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    max-width: 420px;
+    justify-content: flex-end;
+}
+
+.hosts-page-toolbar .search-box {
+    flex: 1;
+}
+
+.hosts-page-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 20px 20px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Shared header bits (search, add) */
+.panel-header {
+    padding: 20px 20px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.panel-header h2 {
+    font-size: 18px;
+    font-weight: 600;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.btn-add {
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: var(--accent-dim);
+    color: var(--accent-hover);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: all var(--t-fast);
+    font-size: 20px;
+    line-height: 1;
+}
+.btn-add:hover {
+    background: var(--accent);
+    color: white;
+    box-shadow: var(--shadow-glow);
+}
+
+.search-box {
+    position: relative;
+}
+.search-box svg {
+    position: absolute;
+    left: 12px;
+    top: 50%;
+    transform: translateY(-50%);
+    color: var(--text-muted);
+    pointer-events: none;
+}
+.search-box input {
+    width: 100%;
+    height: 38px;
+    padding: 0 12px 0 38px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-input);
+    border-radius: var(--r-sm);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    outline: none;
+    transition: border-color var(--t-fast);
+}
+.search-box input::placeholder {
+    color: var(--text-dim);
+}
+.search-box input:focus {
+    border-color: var(--border-active);
+    background: var(--bg-input-focus);
+}
+
+/* ─── Card grid (3–4 columns) ─── */
+.hosts-list:not(:has(.host-folder-section)) {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    align-items: start;
+}
+
+.host-folder-items {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    align-items: start;
+    width: 100%;
+}
+
+@media (max-width: 1100px) {
+    .hosts-list:not(:has(.host-folder-section)),
+    .host-folder-items {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 720px) {
+    .hosts-list:not(:has(.host-folder-section)),
+    .host-folder-items {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 440px) {
+    .hosts-list:not(:has(.host-folder-section)),
+    .host-folder-items {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* Folder mode: stack sections full-width (align-items: start on grid was shrinking sections) */
+.hosts-list:has(.host-folder-section) {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 2px;
+    width: 100%;
+}
+
+.host-folder-section {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    width: 100%;
+    min-width: 0;
+    align-self: stretch;
+}
+
+.host-folder-section + .host-folder-section::before {
+    content: '';
+    display: block;
+    width: 100%;
+    height: 0;
+    margin-bottom: 6px;
+    border-top: 1px solid var(--border);
+}
+
+.host-folder-header {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    gap: 5px;
+    padding: 2px 0 0;
+    color: var(--text-muted);
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    cursor: pointer;
+    user-select: none;
+    line-height: 1.2;
+}
+
+.host-folder-arrow {
+    display: inline-block;
+    transition: transform var(--t-fast);
+    font-size: 10px;
+    line-height: 1;
+}
+
+.host-folder-name {
+    flex: 1;
+}
+
+.host-folder-count {
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+}
+
+.host-pinned-section .host-folder-header {
+    color: var(--accent);
+}
+
+.host-folder-pin {
+    display: inline-flex;
+    align-items: center;
+    color: var(--accent);
+    flex-shrink: 0;
+}
+
+.host-card-badges {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    flex-shrink: 0;
+}
+
+.host-pin-badge {
+    display: inline-flex;
+    align-items: center;
+    color: var(--accent);
+    opacity: 0.9;
+}
+
+.host-card.is-pinned {
+    border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+
+.host-folder-section.collapsed .host-folder-items {
+    display: none;
+}
+
+.host-folder-section.collapsed .host-folder-arrow {
+    transform: rotate(-90deg);
+}
+
+.host-folder-create {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin: -12px 0 18px;
+}
+
+.host-folder-create input {
+    height: 32px;
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-input);
+    border: 1px solid var(--border-input);
+    border-radius: var(--r-sm);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    padding: 0 10px;
+    outline: none;
+}
+
+.host-folder-create input:focus {
+    border-color: var(--border-active);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.tag-folder {
+    background: var(--green-dim);
+    color: var(--green);
+}
+
+.host-card {
+    padding: 8px 10px 7px;
+    min-height: 0;
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: background var(--t-fast), border-color var(--t-fast), box-shadow var(--t-fast), transform var(--t-smooth);
+    animation: fadeIn 200ms ease both;
+    position: relative;
+    flex-direction: column;
+    gap: 0;
+}
+.host-card:hover {
+    background: var(--bg-card-hover);
+    border-color: var(--border-hover);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-sm);
+}
+.host-card:active {
+    transform: translateY(0);
+}
+
+.host-card-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 4px;
+    margin-bottom: 3px;
+}
+.host-card-name {
+    font-weight: 600;
+    font-size: 12px;
+    line-height: 1.25;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+.host-card-status {
+    width: 6px;
+    height: 6px;
+    margin-top: 3px;
+    border-radius: 50%;
+    background: var(--text-dim);
+    flex-shrink: 0;
+}
+.host-card-status.online {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+}
+
+.host-card-endpoint {
+    font-size: 10px;
+    line-height: 1.3;
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.hosts-empty {
+    grid-column: 1 / -1;
+    min-height: 280px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    gap: 12px;
+    padding: 40px;
+    text-align: center;
+}
+.hosts-empty svg {
+    opacity: 0.3;
+}
+.hosts-empty p {
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+/* ─── Action menu (left click) ─── */
+.host-action-menu {
+    position: fixed;
+    z-index: 9999;
+    display: none;
+    flex-direction: column;
+    min-width: 168px;
+    padding: 6px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--r-md);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+    font-family: var(--font-sans);
+    font-size: 13px;
+    animation: fadeIn 120ms ease;
+}
+
+.host-action-menu-title {
+    padding: 6px 10px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--text-muted);
+    border-bottom: 1px solid var(--border);
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 220px;
+}
+
+.host-action-menu button {
+    appearance: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    background: transparent;
+    border: none;
+    color: var(--text-primary);
+    text-align: left;
+    padding: 8px 10px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: background var(--t-fast);
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.host-action-menu button:hover {
+    background: var(--bg-hover);
+}
+
+.host-action-menu button[data-action="connect"],
+.host-action-menu button[data-action="run"] {
+    color: var(--green);
+}
+
+.host-action-menu button svg {
+    flex-shrink: 0;
+}
+
+/* ─── Edit modal (entity-edit-*; host-edit-* aliases kept for compatibility) ─── */
+.entity-edit-overlay .entity-edit-modal,
+.host-edit-overlay .host-edit-modal {
+    min-width: 440px;
+    max-width: 520px;
+    width: min(520px, calc(100vw - 48px));
+    max-height: min(90vh, 100%);
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    overflow: hidden;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+.entity-edit-modal-header,
+.host-edit-modal-header {
+    grid-row: 1;
+    flex-shrink: 0;
+    padding: 20px 24px 14px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    background: var(--bg-secondary);
+}
+
+.entity-edit-modal-header h3,
+.host-edit-modal-header h3 {
+    margin: 0;
+    font-size: 18px;
+    font-weight: 600;
+}
+
+.entity-edit-modal-body.detail-form,
+.host-edit-modal-body.detail-form {
+    grid-row: 2;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: none;
+    animation: none;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+}
+
+.entity-edit-modal-body .csel.open,
+.host-edit-modal-body .csel.open {
+    z-index: 20;
+}
+
+.entity-edit-modal-body .csel-dropdown,
+.host-edit-modal-body .csel-dropdown {
+    z-index: 30;
+}
+
+.entity-edit-modal-actions,
+.host-edit-modal-actions {
+    grid-row: 3;
+    flex-shrink: 0;
+    padding: 14px 24px 20px;
+    margin-top: 0 !important;
+    border-top: 1px solid var(--border);
+    background: var(--bg-secondary);
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+
+.detail-form {
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+.form-group label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+.form-group input,
+.form-group textarea {
+    width: 100%;
+    height: 42px;
+    padding: 0 14px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-input);
+    border-radius: var(--r-sm);
+    color: var(--text-primary);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    outline: none;
+    transition: all var(--t-fast);
+}
+.form-group textarea {
+    height: 80px;
+    padding: 10px 14px;
+    resize: vertical;
+    font-family: var(--font-mono);
+    font-size: 13px;
+}
+.form-group input:focus,
+.form-group textarea:focus {
+    border-color: var(--border-active);
+    background: var(--bg-input-focus);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+.form-group .csel {
+    width: 100%;
+}
+.form-group .csel .csel-trigger {
+    height: 42px;
+    font-size: 14px;
+}
+.form-group .csel .csel-dropdown {
+    right: auto;
+    left: 0;
+}
+
+.form-row {
+    display: flex;
+    gap: 16px;
+}
+.form-row .form-group {
+    flex: 1;
+}
+
+.form-actions {
+    display: flex;
+    gap: 12px;
+    padding-top: 8px;
+}
+
+/* Connect button on the host form */
+.btn-connect {
+    background: var(--green);
+    color: #0a0a0c;
+    box-shadow: 0 2px 8px rgba(34, 197, 94, 0.25);
+}
+.btn-connect:hover {
+    background: var(--green);
+    filter: brightness(1.1);
+    box-shadow: 0 4px 16px rgba(34, 197, 94, 0.4);
+}
+.btn-connect svg {
+    stroke: currentColor;
+}
+
+/* ─── Drag to reorder ─────────────────────────────────────── */
+
+.host-card {
+    display: flex;
+    align-items: stretch;
+}
+
+.host-card-body {
+    flex: 1;
+    min-width: 0;
+    padding-right: 4px;
+}
+
+.host-card-drag {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 20px;
+    height: 20px;
+    color: var(--text-dim);
+    opacity: 0;
+    cursor: grab;
+    border-radius: 4px;
+    transition: opacity var(--t-fast), color var(--t-fast), background var(--t-fast);
+    z-index: 1;
+}
+.host-card:hover .host-card-drag {
+    opacity: 0.85;
+}
+.host-card-drag:hover {
+    background: var(--bg-hover);
+}
+.host-card-drag:hover {
+    color: var(--text-primary, #cdd6f4);
+    opacity: 1 !important;
+}
+.host-card-drag:active {
+    cursor: grabbing;
+}
+
+.host-card.is-dragging {
+    opacity: 0.4;
+    transform: none !important;
+    box-shadow: none !important;
+}
+
+/* Floating drag preview — GPU-composited (transform only), no pointer
+   events so elementFromPoint reaches the card underneath. */
+.host-card-ghost {
+    position: fixed;
+    top: 0;
+    left: 0;
+    z-index: 9999;
+    pointer-events: none;
+    opacity: 0.92;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.4);
+    border-color: var(--primary, #eab308) !important;
+    animation: none !important;
+    margin: 0;
+    will-change: transform;
+}
+
+/* Drop target in grid */
+.host-card.drop-above,
+.host-card.drop-below {
+    transform: none !important;
+    box-shadow: 0 0 0 2px var(--accent, #eab308) !important;
+    border-color: var(--accent, #eab308) !important;
+}

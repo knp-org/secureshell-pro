@@ -1,0 +1,3 @@
+Inter and JetBrains Mono are distributed under the SIL Open Font License 1.1.
+Source: https://github.com/rsms/inter and https://github.com/JetBrains/JetBrainsMono
+Bundled woff2 subsets: latin, weights used by the app UI.

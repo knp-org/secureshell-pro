@@ -1,0 +1,95 @@
+/* ═══════════════════════════════════════════════════════════
+   Custom window title bar (frameless Tauri window)
+   ═══════════════════════════════════════════════════════════ */
+
+#app-shell {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    width: 100vw;
+    overflow: hidden;
+}
+
+.titlebar {
+    flex-shrink: 0;
+    height: var(--titlebar-h, 36px);
+    display: flex;
+    align-items: stretch;
+    background: var(--bg-sidebar);
+    border-bottom: 1px solid var(--border);
+    user-select: none;
+    z-index: 100;
+}
+
+.titlebar-drag {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 0 12px;
+    min-width: 0;
+    -webkit-app-region: drag;
+    app-region: drag;
+    cursor: default;
+}
+
+.titlebar-logo {
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+    opacity: 0.95;
+}
+
+.titlebar-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.titlebar-controls {
+    display: flex;
+    align-items: stretch;
+    flex-shrink: 0;
+    -webkit-app-region: no-drag;
+    app-region: no-drag;
+}
+
+.titlebar-btn {
+    width: 46px;
+    height: 100%;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    transition: background var(--t-fast), color var(--t-fast);
+}
+
+.titlebar-btn:hover {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+}
+
+.titlebar-btn-close:hover {
+    background: var(--red);
+    color: #fff;
+}
+
+.titlebar-btn .icon-restore {
+    display: none;
+}
+
+.titlebar-btn.is-maximized .icon-maximize {
+    display: none;
+}
+
+.titlebar-btn.is-maximized .icon-restore {
+    display: block;
+}

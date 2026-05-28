@@ -1,0 +1,50 @@
+[package]
+name = "secureshell-pro"
+version = "0.4.0"
+license = "AGPL-3.0"
+description = "A secure desktop SSH workspace for hosts, keys, snippets, terminal sessions, and encrypted LAN sync."
+authors = ["SecureShell Pro"]
+edition = "2021"
+
+[lib]
+name = "secureshell_pro_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+arboard = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+thiserror = "1"
+portable-pty = "0.8"
+log = "0.4"
+env_logger = "0.11"
+
+# Vault / cross-platform encryption (post-quantum-safe symmetric)
+argon2  = "0.5"
+aes-gcm = "0.10"
+rand    = "0.8"
+zeroize = { version = "1", features = ["derive"] }
+base64  = "0.22"
+sha2    = "0.10"
+hex     = "0.4"
+
+# LAN peer-to-peer sync
+snow    = "0.9"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+mdns-sd  = "0.11"
+if-addrs = "0.13"
+qrcode  = { version = "0.14", default-features = false, features = ["svg"] }
+hostname = "0.4"
+tokio   = { version = "1", features = ["rt", "macros", "io-util", "net", "sync", "time"] }
+
+# SFTP file browser
+ssh2    = { version = "0.9", features = ["vendored-openssl"] }

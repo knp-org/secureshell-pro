@@ -1,0 +1,248 @@
+/* ═══════════════════════════════════════════════════════════
+   Snippets View — uses hosts-list grid from hosts.css
+   ═══════════════════════════════════════════════════════════ */
+
+#view-commands {
+    display: none;
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+}
+#view-commands.active {
+    display: flex;
+}
+
+.snippets-page {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--bg-primary);
+}
+
+.snippets-page-header {
+    flex-shrink: 0;
+    padding: 20px 28px 16px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    background: var(--bg-secondary);
+}
+
+.snippets-page-header h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0;
+}
+
+.snippets-page-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    max-width: 420px;
+    justify-content: flex-end;
+}
+
+.snippets-page-toolbar .search-box {
+    flex: 1;
+}
+
+.snippets-page-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 20px 20px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+/* Snippet cards — fixed height regardless of content length */
+.host-card.snippet-card {
+    min-height: 92px;
+    height: 92px;
+    box-sizing: border-box;
+}
+
+.host-card.snippet-card .host-card-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    height: 100%;
+}
+
+.host-card.snippet-card .host-card-top {
+    flex-shrink: 0;
+}
+
+.host-card.snippet-card .host-card-endpoint.snippet-card-cmd {
+    flex: 0 0 2.6em;
+    min-height: 2.6em;
+    max-height: 2.6em;
+    margin: 0;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.host-card.snippet-card .snippet-card-tags {
+    flex: 0 0 22px;
+    min-height: 22px;
+    max-height: 22px;
+    display: flex;
+    gap: 4px;
+    flex-wrap: nowrap;
+    align-items: center;
+    margin-top: auto;
+    overflow: hidden;
+}
+
+.snippet-card-tags:empty {
+    visibility: hidden;
+}
+
+.snippet-card-tags .tag {
+    padding: 2px 6px;
+    background: var(--accent-dim);
+    color: var(--accent-hover);
+    border-radius: 20px;
+    font-size: 10px;
+    font-weight: 500;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tag-folder {
+    background: var(--green-dim);
+    color: var(--green);
+}
+
+.tag-host {
+    background: rgba(59, 130, 246, 0.15);
+    color: var(--blue);
+}
+
+/* ─── Edit modal extras ─── */
+.snippet-folder-create,
+.snippet-var-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.snippet-folder-create {
+    margin: -12px 0 18px;
+}
+
+.snippet-folder-create input,
+.snippet-var-row input {
+    height: 32px;
+    flex: 1;
+    min-width: 0;
+    background: var(--bg-input);
+    border: 1px solid var(--border-input);
+    border-radius: var(--r-sm);
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 0 10px;
+    outline: none;
+}
+
+.snippet-folder-create input:focus,
+.snippet-var-row input:focus {
+    border-color: var(--border-active);
+    box-shadow: 0 0 0 3px var(--accent-dim);
+}
+
+.snippet-var-builder {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: -4px 0 18px;
+}
+
+.snippet-var-preview {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    min-height: 22px;
+    align-items: center;
+}
+
+.snippet-var-chip {
+    display: inline-flex;
+    align-items: center;
+    height: 22px;
+    padding: 0 8px;
+    border-radius: 999px;
+    background: var(--accent-dim);
+    color: var(--accent-hover);
+    font-family: var(--font-mono);
+    font-size: 11px;
+}
+
+.snippet-var-empty {
+    color: var(--text-dim);
+    font-size: 12px;
+}
+
+.snippet-host-picker {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 8px;
+}
+
+.snippet-host-option {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 2px 8px;
+    align-items: center;
+    padding: 8px 10px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-input);
+    border-radius: var(--r-sm);
+    cursor: pointer;
+}
+
+.snippet-host-option:has(input:checked) {
+    border-color: var(--border-active);
+    background: var(--bg-selected);
+}
+
+.snippet-host-option input {
+    grid-row: span 2;
+    accent-color: var(--accent);
+}
+
+.snippet-host-option span {
+    color: var(--text-primary);
+    font-size: 13px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.snippet-host-option small {
+    color: var(--text-muted);
+    font-family: var(--font-mono);
+    font-size: 11px;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.snippet-host-empty {
+    color: var(--text-dim);
+    font-size: 12px;
+}
