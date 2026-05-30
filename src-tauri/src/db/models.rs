@@ -57,11 +57,17 @@ pub struct SshKey {
     pub private_key: Option<String>, // Will be encrypted in Phase 3
     pub fingerprint: Option<String>,
     pub created_at: String,
+    /// Server-managed: stamped on every save so edits (and master-password
+    /// re-encryption) propagate over LAN sync. Defaulted for older frontends
+    /// that don't send it.
+    #[serde(default)]
+    pub updated_at: String,
     pub synced: bool,
 }
 
 impl SshKey {
     pub fn new(label: String, key_type: String) -> Self {
+        let now = chrono::Utc::now().to_rfc3339();
         Self {
             id: Uuid::new_v4().to_string(),
             label,
@@ -69,7 +75,8 @@ impl SshKey {
             public_key: None,
             private_key: None,
             fingerprint: None,
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: now.clone(),
+            updated_at: now,
             synced: false,
         }
     }

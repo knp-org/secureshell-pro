@@ -80,6 +80,7 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             private_key     TEXT,
             fingerprint     TEXT,
             created_at      TEXT NOT NULL,
+            updated_at      TEXT,
             synced          INTEGER DEFAULT 0
         );
 
@@ -124,6 +125,13 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // vault_meta gained updated_at after v1.
     if !column_exists(conn, "vault_meta", "updated_at") {
         let _ = conn.execute("ALTER TABLE vault_meta ADD COLUMN updated_at TEXT", []);
+    }
+
+    // ssh_keys gained updated_at so master-password re-encryption (and edits)
+    // propagate over sync. Backfill existing rows from created_at.
+    if !column_exists(conn, "ssh_keys", "updated_at") {
+        let _ = conn.execute("ALTER TABLE ssh_keys ADD COLUMN updated_at TEXT", []);
+        let _ = conn.execute("UPDATE ssh_keys SET updated_at = created_at WHERE updated_at IS NULL", []);
     }
 
     Ok(())

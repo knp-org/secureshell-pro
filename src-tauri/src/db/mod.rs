@@ -170,7 +170,10 @@ impl Database {
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
-        // Re-wrap one secret column for every row that has a value.
+        // Re-wrap one secret column for every row that has a value. Bumping
+        // updated_at makes the re-encrypted secret win on the next LAN sync, so
+        // paired peers receive ciphertext that matches the new vault key.
+        let now = chrono::Utc::now().to_rfc3339();
         let rekey_column = |table: &str, column: &str| -> Result<(), String> {
             let sql = format!("SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL");
             let mut select = tx.prepare(&sql).map_err(|e| e.to_string())?;
@@ -190,8 +193,8 @@ impl Database {
                     stored // legacy plaintext that was never wrapped
                 };
                 let env = crypto::encrypt_field(&plaintext, new_key, &id).map_err(|e| e.to_string())?;
-                let update = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
-                tx.execute(&update, rusqlite::params![env, id]).map_err(|e| e.to_string())?;
+                let update = format!("UPDATE {table} SET {column} = ?1, updated_at = ?2 WHERE id = ?3");
+                tx.execute(&update, rusqlite::params![env, now, id]).map_err(|e| e.to_string())?;
             }
             Ok(())
         };
@@ -374,12 +377,12 @@ impl Database {
     pub fn get_all_keys(&self) -> Result<Vec<SshKey>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, label, key_type, public_key, private_key, fingerprint, created_at, synced FROM ssh_keys ORDER BY label ASC")
+            .prepare("SELECT id, label, key_type, public_key, private_key, fingerprint, created_at, COALESCE(updated_at, created_at), synced FROM ssh_keys ORDER BY label ASC")
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
             .query_map([], |row| {
-                let synced_int: i32 = row.get(7)?;
+                let synced_int: i32 = row.get(8)?;
                 Ok(SshKey {
                     id: row.get(0)?,
                     label: row.get(1)?,
@@ -388,6 +391,7 @@ impl Database {
                     private_key: row.get(4)?,
                     fingerprint: row.get(5)?,
                     created_at: row.get(6)?,
+                    updated_at: row.get(7)?,
                     synced: synced_int != 0,
                 })
             })
@@ -402,8 +406,10 @@ impl Database {
 
     pub fn save_key(&self, key: &SshKey) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        // Stamp updated_at server-side so every save advances the sync clock.
+        let now = chrono::Utc::now().to_rfc3339();
         conn.execute(
-            "INSERT OR REPLACE INTO ssh_keys (id, label, key_type, public_key, private_key, fingerprint, created_at, synced) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT OR REPLACE INTO ssh_keys (id, label, key_type, public_key, private_key, fingerprint, created_at, updated_at, synced) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 key.id,
                 key.label,
@@ -412,6 +418,7 @@ impl Database {
                 key.private_key,
                 key.fingerprint,
                 key.created_at,
+                now,
                 key.synced as i32,
             ],
         )
@@ -557,9 +564,9 @@ impl Database {
             "connections" | "snippets" => (
                 format!("SELECT id, updated_at, deleted_at FROM {}", table), true
             ),
-            // ssh_keys has no updated_at column — use created_at for sync ordering.
+            // ssh_keys gained updated_at; fall back to created_at for legacy rows.
             "ssh_keys" => (
-                "SELECT id, created_at AS updated_at, deleted_at FROM ssh_keys".to_string(), true
+                "SELECT id, COALESCE(updated_at, created_at) AS updated_at, deleted_at FROM ssh_keys".to_string(), true
             ),
             "groups" => (
                 "SELECT id, created_at AS updated_at, deleted_at FROM groups".to_string(), true
@@ -590,7 +597,7 @@ impl Database {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let sql = match table {
             "connections" => "SELECT id, name, host, port, username, auth_method, password, key_id, group_id, tags, color, last_connected, created_at, updated_at, deleted_at FROM connections WHERE id = ?1",
-            "ssh_keys"    => "SELECT id, label, key_type, public_key, private_key, fingerprint, created_at, deleted_at FROM ssh_keys WHERE id = ?1",
+            "ssh_keys"    => "SELECT id, label, key_type, public_key, private_key, fingerprint, created_at, updated_at, deleted_at FROM ssh_keys WHERE id = ?1",
             "snippets"    => "SELECT id, label, command, description, tags, connection_ids, group_id, created_at, updated_at, deleted_at FROM snippets WHERE id = ?1",
             "groups"      => "SELECT id, name, parent_id, icon, color, created_at, deleted_at FROM groups WHERE id = ?1",
             _             => return Err(format!("unknown sync table {}", table)),
@@ -633,7 +640,7 @@ impl Database {
 
         let columns: &[&str] = match table {
             "connections" => &["id","name","host","port","username","auth_method","password","key_id","group_id","tags","color","last_connected","created_at","updated_at","deleted_at"],
-            "ssh_keys"    => &["id","label","key_type","public_key","private_key","fingerprint","created_at","deleted_at"],
+            "ssh_keys"    => &["id","label","key_type","public_key","private_key","fingerprint","created_at","updated_at","deleted_at"],
             "snippets"    => &["id","label","command","description","tags","connection_ids","group_id","created_at","updated_at","deleted_at"],
             "groups"      => &["id","name","parent_id","icon","color","created_at","deleted_at"],
             _             => return Err(format!("unknown sync table {}", table)),
