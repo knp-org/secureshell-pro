@@ -4,6 +4,7 @@ use tauri::{AppHandle, Emitter, State};
 use crate::sftp::{FileEntry, SftpManager};
 use crate::vault::{maybe_decrypt_field, Vault};
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 // ─── Connect ───────────────────────────────────────────────
@@ -37,6 +38,7 @@ pub fn sftp_connect(
                     let tmp_path =
                         std::env::temp_dir().join(format!("ssp_sftp_key_{}", uuid::Uuid::new_v4()));
                     std::fs::write(&tmp_path, priv_key).map_err(|e| e.to_string())?;
+                    #[cfg(unix)]
                     std::fs::set_permissions(
                         &tmp_path,
                         std::fs::Permissions::from_mode(0o600),
@@ -287,12 +289,23 @@ pub fn local_list_dir(path: String) -> Result<Vec<FileEntry>, String> {
             .map(|d| d.as_secs() as i64)
             .unwrap_or(0);
 
+        #[cfg(unix)]
+        let permissions = metadata.permissions().mode();
+        #[cfg(not(unix))]
+        let permissions = if metadata.permissions().readonly() {
+            if metadata.is_dir() { 0o555 } else { 0o444 }
+        } else if metadata.is_dir() {
+            0o755
+        } else {
+            0o644
+        };
+
         entries.push(FileEntry {
             name,
             path: full_path,
             is_dir: metadata.is_dir(),
             size: metadata.len(),
-            permissions: metadata.permissions().mode(),
+            permissions,
             modified,
             is_symlink: metadata.file_type().is_symlink(),
         });
@@ -345,6 +358,17 @@ pub fn local_mkdir(path: String) -> Result<(), String> {
 
 #[tauri::command]
 pub fn local_chmod(path: String, mode: u32) -> Result<(), String> {
-    let perms = std::fs::Permissions::from_mode(mode);
-    std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())
+    #[cfg(unix)]
+    {
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows has no Unix permission bits; only the read-only flag is
+        // adjustable. Treat the owner-write bit as the read-only toggle.
+        let mut perms = std::fs::metadata(&path).map_err(|e| e.to_string())?.permissions();
+        perms.set_readonly(mode & 0o200 == 0);
+        std::fs::set_permissions(&path, perms).map_err(|e| e.to_string())
+    }
 }

@@ -4,6 +4,7 @@ use tauri::{AppHandle, State};
 use crate::ssh::SshManager;
 use crate::vault::{maybe_decrypt_field, Vault};
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 #[derive(Deserialize)]
@@ -35,6 +36,7 @@ pub fn ssh_connect(
                 if let Some(priv_key) = decrypted {
                     let tmp_path = std::env::temp_dir().join(format!("ssp_key_{}", uuid::Uuid::new_v4()));
                     std::fs::write(&tmp_path, priv_key).map_err(|e| e.to_string())?;
+                    #[cfg(unix)]
                     std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
                     key_path_to_use = Some(tmp_path);
                 }
