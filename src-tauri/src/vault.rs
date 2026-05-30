@@ -155,3 +155,43 @@ pub fn vault_lock(vault: State<'_, Vault>) -> Result<(), String> {
     Ok(())
 }
 
+/// Rotate the master password. Verifies `current_password` against the stored
+/// verifier, then derives a fresh key under a new random salt and re-encrypts
+/// every stored secret to it. On success the in-memory key is swapped so the
+/// current session stays unlocked.
+#[tauri::command]
+pub fn vault_change_password(
+    db: State<'_, Database>,
+    vault: State<'_, Vault>,
+    current_password: String,
+    new_password: String,
+) -> Result<(), String> {
+    let Some((kdf, verifier)) = db.get_vault_meta()? else {
+        return Err("vault not initialized — use vault_init first".into());
+    };
+    if new_password.is_empty() {
+        return Err("new master password cannot be empty".into());
+    }
+
+    // 1. Prove the caller knows the current password.
+    let old_key = crypto::derive_key(&current_password, &kdf).map_err(|e| e.to_string())?;
+    crypto::verify(&old_key, &verifier).map_err(|_| "current password is incorrect".to_string())?;
+
+    if new_password == current_password {
+        return Err("new password must differ from the current one".into());
+    }
+
+    // 2. Derive a brand-new key from the new password under a fresh salt.
+    let new_kdf = KdfParams::new_random();
+    let new_key = crypto::derive_key(&new_password, &new_kdf).map_err(|e| e.to_string())?;
+    let new_verifier = crypto::make_verifier(&new_key).map_err(|e| e.to_string())?;
+
+    // 3. Back up the DB, then atomically re-key every secret + the meta.
+    db.backup_to_sibling().ok(); // best-effort
+    db.run_rekey(&old_key, &new_key, &new_kdf, &new_verifier)?;
+
+    // 4. Keep the session unlocked under the new key.
+    vault.set(new_key)?;
+    Ok(())
+}
+

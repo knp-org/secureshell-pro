@@ -101,9 +101,10 @@ function renderSkeleton(container) {
         </div>
     `;
 
-    document.getElementById('btn-toggle-snippets').addEventListener('click', () => {
+    document.getElementById('btn-toggle-snippets').addEventListener('click', (e) => {
         const sidebar = document.getElementById('snippets-sidebar');
-        sidebar.classList.toggle('open');
+        const isOpen = sidebar.classList.toggle('open');
+        e.currentTarget.classList.toggle('active', isOpen);
         // Refit active terminal when sidebar toggles
         setTimeout(() => refitCurrentSession(), 200);
     });

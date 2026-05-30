@@ -104,9 +104,7 @@ function aboutSection() {
 // ─── Event wiring ──────────────────────────────────────────
 
 async function bindEvents() {
-    document.getElementById('set-change-pwd')?.addEventListener('click', () => {
-        showToast('Master password rotation coming next', 'info');
-    });
+    document.getElementById('set-change-pwd')?.addEventListener('click', openChangePasswordModal);
     document.getElementById('set-pair-device')?.addEventListener('click', openPairingModal);
     refreshPeers();
 
@@ -291,6 +289,75 @@ async function openPairingModal() {
             break;
         }
     }
+}
+
+// ─── Change master password ────────────────────────────────
+
+function openChangePasswordModal() {
+    const overlay = document.createElement('div');
+    overlay.className = 'pair-overlay';
+    overlay.innerHTML = `
+        <div class="pair-modal cpw-modal">
+            <h3>Change Master Password</h3>
+            <p class="pair-desc">
+                Re-encrypts every saved password and private key under your new password.
+                <strong>It cannot be recovered if you lose it.</strong>
+            </p>
+            <form class="cpw-form" autocomplete="off">
+                <label class="cpw-field">
+                    <span>Current password</span>
+                    <input type="password" name="current" autocomplete="current-password" />
+                </label>
+                <label class="cpw-field">
+                    <span>New password</span>
+                    <input type="password" name="next" autocomplete="new-password" />
+                </label>
+                <label class="cpw-field">
+                    <span>Confirm new password</span>
+                    <input type="password" name="confirm" autocomplete="new-password" />
+                </label>
+                <div class="cpw-error" id="cpw-error"></div>
+                <div class="pair-actions">
+                    <button type="button" class="btn btn-secondary" id="cpw-cancel">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="cpw-submit">Change password</button>
+                </div>
+            </form>
+        </div>`;
+    document.body.appendChild(overlay);
+
+    const form     = overlay.querySelector('.cpw-form');
+    const current  = overlay.querySelector('input[name="current"]');
+    const next     = overlay.querySelector('input[name="next"]');
+    const confirm  = overlay.querySelector('input[name="confirm"]');
+    const errEl    = overlay.querySelector('#cpw-error');
+    const submitEl = overlay.querySelector('#cpw-submit');
+
+    const close = () => overlay.remove();
+    overlay.querySelector('#cpw-cancel').addEventListener('click', close);
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
+    current.focus();
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        errEl.textContent = '';
+        if (!current.value)              { errEl.textContent = 'Enter your current password'; return; }
+        if (next.value.length < 8)       { errEl.textContent = 'New password must be at least 8 characters'; return; }
+        if (next.value !== confirm.value){ errEl.textContent = 'New passwords do not match'; return; }
+        if (next.value === current.value){ errEl.textContent = 'New password must differ from the current one'; return; }
+
+        submitEl.disabled = true;
+        submitEl.textContent = 'Re-encrypting…';
+        try {
+            await api.vaultChangePassword(current.value, next.value);
+            close();
+            showToast('Master password changed', 'success');
+        } catch (err) {
+            errEl.textContent = String(err);
+            submitEl.disabled = false;
+            submitEl.textContent = 'Change password';
+            current.select();
+        }
+    });
 }
 
 function escHtml(s){ return (s ?? '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }

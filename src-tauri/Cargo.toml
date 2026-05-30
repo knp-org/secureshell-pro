@@ -1,6 +1,6 @@
 [package]
 name = "secureshell-pro"
-version = "0.4.0"
+version = "1.0.0"
 license = "AGPL-3.0"
 description = "A secure desktop SSH workspace for hosts, keys, snippets, terminal sessions, and encrypted LAN sync."
 authors = ["SecureShell Pro"]

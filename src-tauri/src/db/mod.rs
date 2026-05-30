@@ -152,6 +152,76 @@ impl Database {
         Ok(())
     }
 
+    /// Re-encrypt every stored secret from `old_key` to `new_key`, then rewrite
+    /// `vault_meta` with the new KDF params + verifier. Used when the user
+    /// changes their master password. The whole rotation runs in a single
+    /// transaction: either all rows and the meta are updated, or nothing is.
+    ///
+    /// Record ids (the AAD) are stable, so each secret is simply unwrapped with
+    /// the old key and re-wrapped with the new one. Any legacy plaintext field
+    /// is encrypted fresh under the new key.
+    pub fn run_rekey(
+        &self,
+        old_key: &MasterKey,
+        new_key: &MasterKey,
+        new_kdf: &KdfParams,
+        new_verifier: &Envelope,
+    ) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        // Re-wrap one secret column for every row that has a value.
+        let rekey_column = |table: &str, column: &str| -> Result<(), String> {
+            let sql = format!("SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL");
+            let mut select = tx.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows: Vec<(String, String)> = select
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(select);
+            for (id, stored) in rows {
+                if stored.is_empty() {
+                    continue;
+                }
+                let plaintext = if crypto::is_envelope(&stored) {
+                    crypto::decrypt_field(&stored, old_key, &id).map_err(|e| e.to_string())?
+                } else {
+                    stored // legacy plaintext that was never wrapped
+                };
+                let env = crypto::encrypt_field(&plaintext, new_key, &id).map_err(|e| e.to_string())?;
+                let update = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
+                tx.execute(&update, rusqlite::params![env, id]).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
+
+        rekey_column("connections", "password")?;
+        rekey_column("ssh_keys", "private_key")?;
+
+        // vault_meta — swap in the new salt/params + verifier. Bump updated_at
+        // so the rotation propagates on the next LAN sync.
+        let verifier_json = serde_json::to_string(new_verifier).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE vault_meta
+             SET kdf = ?1, salt = ?2, m_cost = ?3, t_cost = ?4, p_cost = ?5, verifier = ?6, updated_at = ?7
+             WHERE id = 1",
+            rusqlite::params![
+                new_kdf.kdf,
+                new_kdf.salt,
+                new_kdf.m_cost as i64,
+                new_kdf.t_cost as i64,
+                new_kdf.p_cost as i64,
+                verifier_json,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
     // ─── Connections ───────────────────────────────────────────
 
     pub fn get_all_connections(&self) -> Result<Vec<SshConnection>, String> {

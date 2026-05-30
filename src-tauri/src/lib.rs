@@ -45,6 +45,7 @@ pub fn run() {
             vault::vault_init,
             vault::vault_unlock,
             vault::vault_lock,
+            vault::vault_change_password,
             // LAN sync — pairing
             sync::pairing_start,
             sync::pairing_cancel,
