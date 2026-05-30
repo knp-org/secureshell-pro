@@ -3,7 +3,7 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Platform: Linux · Windows](https://img.shields.io/badge/Platform-Linux%20·%20Windows-informational)]()
 [![Built with Tauri 2](https://img.shields.io/badge/Built%20with-Tauri%202-ffc131?logo=tauri&logoColor=white)]()
-[![Version](https://img.shields.io/badge/Version-0.4.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.0.0-brightgreen)]()
 
 A private, local-first desktop SSH workspace for managing remote hosts, private keys, reusable command snippets, terminal sessions, SFTP file transfers, and encrypted LAN sync — all without a cloud account.
 
@@ -28,6 +28,7 @@ A private, local-first desktop SSH workspace for managing remote hosts, private 
 
 - **Vault encryption** — All sensitive credentials (passwords, private keys, passphrases) are encrypted at rest using **AES-256-GCM** with keys derived from a master password via **Argon2id**.
 - **Zero plaintext on disk** — The vault must be unlocked before any protected value can be read or used. Locking the vault clears the in-memory master key.
+- **Master password rotation** — Change your master password at any time from **Settings → Security**. After verifying the current password, every stored secret is re-encrypted under a freshly derived key in a single atomic transaction, with an automatic database backup taken beforehand.
 - **LAN sync** — Pairing uses **X25519 key exchange** and **Noise protocol** for encrypted peer-to-peer communication. Mobile peers authenticate via **HMAC-SHA256 challenge-response**. No cloud relay or hosted service is involved.
 - **Local-first** — All connection data stays on the device by default. Nothing leaves the machine unless you explicitly pair and sync.
 
