@@ -166,7 +166,16 @@ impl Database {
         new_key: &MasterKey,
         new_kdf: &KdfParams,
         new_verifier: &Envelope,
+        old_kdf: &KdfParams,
+        old_verifier: &Envelope,
     ) -> Result<(), String> {
+        // Wrap the new key under the old one so paired peers can adopt this
+        // rotation without the new password. Built outside the lock.
+        let rekey_token = crypto::wrap_master_key(new_key, old_key).map_err(|e| e.to_string())?;
+        let rekey_token_json = serde_json::to_string(&rekey_token).map_err(|e| e.to_string())?;
+        let prev_verifier_json = serde_json::to_string(old_verifier).map_err(|e| e.to_string())?;
+        let prev_salt = old_kdf.salt.clone();
+
         let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
         let tx = conn.transaction().map_err(|e| e.to_string())?;
 
@@ -202,12 +211,14 @@ impl Database {
         rekey_column("connections", "password")?;
         rekey_column("ssh_keys", "private_key")?;
 
-        // vault_meta — swap in the new salt/params + verifier. Bump updated_at
-        // so the rotation propagates on the next LAN sync.
+        // vault_meta — swap in the new salt/params + verifier, plus the re-wrap
+        // token and the previous salt/verifier so the rotation can be adopted
+        // by peers. Bump updated_at so the rotation propagates on the next sync.
         let verifier_json = serde_json::to_string(new_verifier).map_err(|e| e.to_string())?;
         tx.execute(
             "UPDATE vault_meta
-             SET kdf = ?1, salt = ?2, m_cost = ?3, t_cost = ?4, p_cost = ?5, verifier = ?6, updated_at = ?7
+             SET kdf = ?1, salt = ?2, m_cost = ?3, t_cost = ?4, p_cost = ?5, verifier = ?6,
+                 rekey_token = ?7, prev_salt = ?8, prev_verifier = ?9, updated_at = ?10
              WHERE id = 1",
             rusqlite::params![
                 new_kdf.kdf,
@@ -216,10 +227,100 @@ impl Database {
                 new_kdf.t_cost as i64,
                 new_kdf.p_cost as i64,
                 verifier_json,
+                rekey_token_json,
+                prev_salt,
+                prev_verifier_json,
                 chrono::Utc::now().to_rfc3339(),
             ],
         )
         .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Re-key every stored secret from `old_key` to `new_key` and atomically
+    /// promote `meta` to the active `vault_meta`, then clear the pending row.
+    /// Used when adopting a rotation received over sync. Unlike [`run_rekey`]
+    /// this does NOT bump row `updated_at`: the ciphertext is being brought in
+    /// line with a meta the peer already authored, so it must not "win" back
+    /// over the peer on the next sync.
+    pub fn promote_pending_rotation(
+        &self,
+        old_key: &MasterKey,
+        new_key: &MasterKey,
+        meta: &crate::sync::protocol::VaultMetaWire,
+    ) -> Result<(), String> {
+        let verifier_json = serde_json::to_string(&meta.verifier).map_err(|e| e.to_string())?;
+        let rekey_token_json = meta
+            .rekey_token
+            .as_ref()
+            .map(|e| serde_json::to_string(e))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let prev_verifier_json = meta
+            .prev_verifier
+            .as_ref()
+            .map(|e| serde_json::to_string(e))
+            .transpose()
+            .map_err(|e| e.to_string())?;
+
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+
+        let rekey_column = |table: &str, column: &str| -> Result<(), String> {
+            let sql = format!("SELECT id, {column} FROM {table} WHERE {column} IS NOT NULL");
+            let mut select = tx.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows: Vec<(String, String)> = select
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(select);
+            for (id, stored) in rows {
+                if stored.is_empty() || !crypto::is_envelope(&stored) {
+                    continue;
+                }
+                // Rows the peer already re-encrypted are under the new key and
+                // won't decrypt with the old key — leave those untouched. Only
+                // rows still readable with the old key (our local-only secrets)
+                // need re-wrapping to the new key.
+                let Ok(plaintext) = crypto::decrypt_field(&stored, old_key, &id) else {
+                    continue;
+                };
+                let env = crypto::encrypt_field(&plaintext, new_key, &id).map_err(|e| e.to_string())?;
+                let update = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
+                tx.execute(&update, rusqlite::params![env, id]).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
+        rekey_column("connections", "password")?;
+        rekey_column("ssh_keys", "private_key")?;
+
+        tx.execute(
+            "INSERT OR REPLACE INTO vault_meta
+             (id, kdf, salt, m_cost, t_cost, p_cost, verifier, created_at, rekey_token, prev_salt, prev_verifier, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6,
+                     COALESCE((SELECT created_at FROM vault_meta WHERE id = 1), ?7),
+                     ?8, ?9, ?10, ?11)",
+            rusqlite::params![
+                meta.kdf,
+                meta.salt,
+                meta.m_cost as i64,
+                meta.t_cost as i64,
+                meta.p_cost as i64,
+                verifier_json,
+                chrono::Utc::now().to_rfc3339(),
+                rekey_token_json,
+                meta.prev_salt,
+                prev_verifier_json,
+                meta.updated_at.clone().unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.execute("DELETE FROM pending_vault_rotation WHERE id = 1", [])
+            .map_err(|e| e.to_string())?;
 
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
@@ -523,13 +624,62 @@ impl Database {
 
     // ─── Sync helpers ─────────────────────────────────────────
 
-    pub fn get_vault_meta_updated_at(&self) -> Result<Option<String>, String> {
+    /// Full vault_meta as a wire struct, including the rotation re-wrap token
+    /// and previous salt/verifier. `None` if the vault isn't initialized.
+    pub fn get_vault_meta_wire(&self) -> Result<Option<crate::sync::protocol::VaultMetaWire>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let v = conn
-            .query_row("SELECT updated_at FROM vault_meta WHERE id = 1", [], |r| r.get::<_, Option<String>>(0))
-            .ok()
-            .flatten();
-        Ok(v)
+        let row = conn
+            .query_row(
+                "SELECT kdf, salt, m_cost, t_cost, p_cost, verifier, updated_at, rekey_token, prev_salt, prev_verifier
+                 FROM vault_meta WHERE id = 1",
+                [],
+                Self::map_vault_meta_wire_row,
+            )
+            .ok();
+        match row {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    fn map_vault_meta_wire_row(
+        r: &rusqlite::Row<'_>,
+    ) -> rusqlite::Result<Result<crate::sync::protocol::VaultMetaWire, String>> {
+        let kdf: String = r.get(0)?;
+        let salt: String = r.get(1)?;
+        let m_cost: i64 = r.get(2)?;
+        let t_cost: i64 = r.get(3)?;
+        let p_cost: i64 = r.get(4)?;
+        let verifier_json: String = r.get(5)?;
+        let updated_at: Option<String> = r.get(6)?;
+        let rekey_token_json: Option<String> = r.get(7)?;
+        let prev_salt: Option<String> = r.get(8)?;
+        let prev_verifier_json: Option<String> = r.get(9)?;
+        Ok((|| {
+            let verifier: Envelope = serde_json::from_str(&verifier_json).map_err(|e| e.to_string())?;
+            let rekey_token = rekey_token_json
+                .as_deref()
+                .map(serde_json::from_str::<Envelope>)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            let prev_verifier = prev_verifier_json
+                .as_deref()
+                .map(serde_json::from_str::<Envelope>)
+                .transpose()
+                .map_err(|e| e.to_string())?;
+            Ok(crate::sync::protocol::VaultMetaWire {
+                kdf,
+                salt,
+                m_cost: m_cost as u32,
+                t_cost: t_cost as u32,
+                p_cost: p_cost as u32,
+                verifier,
+                updated_at,
+                rekey_token,
+                prev_salt,
+                prev_verifier,
+            })
+        })())
     }
 
     pub fn set_vault_meta_wire(
@@ -537,12 +687,24 @@ impl Database {
         meta: &crate::sync::protocol::VaultMetaWire,
     ) -> Result<(), String> {
         let verifier_json = serde_json::to_string(&meta.verifier).map_err(|e| e.to_string())?;
+        let rekey_token_json = meta
+            .rekey_token
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let prev_verifier_json = meta
+            .prev_verifier
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| e.to_string())?;
         let now = chrono::Utc::now().to_rfc3339();
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT OR REPLACE INTO vault_meta
-             (id, kdf, salt, m_cost, t_cost, p_cost, verifier, created_at, updated_at)
-             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+             (id, kdf, salt, m_cost, t_cost, p_cost, verifier, created_at, rekey_token, prev_salt, prev_verifier, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 meta.kdf,
                 meta.salt,
@@ -551,10 +713,80 @@ impl Database {
                 meta.p_cost as i64,
                 verifier_json,
                 now.clone(),
+                rekey_token_json,
+                meta.prev_salt,
+                prev_verifier_json,
                 meta.updated_at.clone().unwrap_or(now),
             ],
         )
         .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // ─── Pending rotation (received over sync, awaiting key migration) ──
+
+    pub fn set_pending_rotation(
+        &self,
+        meta: &crate::sync::protocol::VaultMetaWire,
+    ) -> Result<(), String> {
+        let verifier_json = serde_json::to_string(&meta.verifier).map_err(|e| e.to_string())?;
+        let rekey_token_json = meta
+            .rekey_token
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let prev_verifier_json = meta
+            .prev_verifier
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| e.to_string())?;
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT OR REPLACE INTO pending_vault_rotation
+             (id, kdf, salt, m_cost, t_cost, p_cost, verifier, rekey_token, prev_salt, prev_verifier, updated_at)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            rusqlite::params![
+                meta.kdf,
+                meta.salt,
+                meta.m_cost as i64,
+                meta.t_cost as i64,
+                meta.p_cost as i64,
+                verifier_json,
+                rekey_token_json,
+                meta.prev_salt,
+                prev_verifier_json,
+                meta.updated_at,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_pending_rotation(&self) -> Result<Option<crate::sync::protocol::VaultMetaWire>, String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let row = conn
+            .query_row(
+                "SELECT kdf, salt, m_cost, t_cost, p_cost, verifier, updated_at, rekey_token, prev_salt, prev_verifier
+                 FROM pending_vault_rotation WHERE id = 1",
+                [],
+                Self::map_vault_meta_wire_row,
+            )
+            .ok();
+        match row {
+            Some(r) => Ok(Some(r?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Discard a parked rotation (e.g. after the new-password fallback path
+    /// promotes it by other means).
+    #[allow(dead_code)]
+    pub fn clear_pending_rotation(&self) -> Result<(), String> {
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM pending_vault_rotation WHERE id = 1", [])
+            .map_err(|e| e.to_string())?;
         Ok(())
     }
 

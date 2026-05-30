@@ -48,6 +48,10 @@ export async function ensureUnlocked() {
             submitBtn.disabled = true;
             submitBtn.classList.add('is-loading');
             submitLabel.textContent = isFirstTime ? 'Encrypting…' : 'Unlocking…';
+            // Yield to the browser so it can paint the spinner before the
+            // Argon2 IPC call starts (even async Tauri calls can starve the
+            // render pipeline on the first microtask tick).
+            await new Promise(r => setTimeout(r, 30));
             try {
                 if (isFirstTime) {
                     await api.vaultInit(pw);

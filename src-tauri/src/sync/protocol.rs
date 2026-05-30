@@ -29,6 +29,21 @@ pub struct VaultMetaWire {
     pub p_cost: u32,
     pub verifier: Envelope,
     pub updated_at: Option<String>,
+    /// New master key wrapped under the previous key (present only on a meta
+    /// produced by a password rotation). Lets a peer holding the old key adopt
+    /// the rotation without the new password. Older builds ignore it.
+    /// Omitted from the wire when absent so a non-rotated meta keeps the same
+    /// hash across versions (no spurious meta exchanges).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rekey_token: Option<Envelope>,
+    /// Salt of the key that `rekey_token` is wrapped under, so a peer can tell
+    /// whether its current key is the one that can unwrap the token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_salt: Option<String>,
+    /// Verifier of the previous key — lets a peer derive/confirm the old key
+    /// (e.g. by prompting for the old password) when it isn't already unlocked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_verifier: Option<Envelope>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,16 +76,7 @@ pub fn vault_meta_hash(meta: &VaultMetaWire) -> String {
 }
 
 pub fn load_vault_meta(db: &Database) -> Result<Option<VaultMetaWire>, String> {
-    let Some((kdf, verifier)) = db.get_vault_meta()? else { return Ok(None) };
-    Ok(Some(VaultMetaWire {
-        kdf: kdf.kdf,
-        salt: kdf.salt,
-        m_cost: kdf.m_cost,
-        t_cost: kdf.t_cost,
-        p_cost: kdf.p_cost,
-        verifier,
-        updated_at: db.get_vault_meta_updated_at()?,
-    }))
+    db.get_vault_meta_wire()
 }
 
 // ─── Sync state machine (both sides drive the same loop) ─────
@@ -277,19 +283,32 @@ fn apply_vault_meta_if_newer(
     incoming: &VaultMetaWire,
     ours: &Option<VaultMetaWire>,
 ) -> Result<(), String> {
-    let take = match ours {
-        None => true,
-        Some(o) => match (o.updated_at.as_deref(), incoming.updated_at.as_deref()) {
-            (Some(a), Some(b)) => b > a,
-            (None, Some(_))     => true,
-            _                    => false,
-        },
-    };
-    if !take { return Ok(()); }
-    // We never overwrite a working vault_meta automatically — that would
-    // brick the local vault. Instead we accept only if local has none.
-    if ours.is_none() {
-        db.set_vault_meta_wire(incoming)?;
+    match ours {
+        // Fresh device with no vault yet: adopt directly — there are no
+        // local secrets under an old key, so nothing can be bricked.
+        None => db.set_vault_meta_wire(incoming),
+        // We already have a vault. Only act if the incoming meta is strictly
+        // newer (a rotation). We do NOT swap it here — doing so without
+        // re-encrypting our local-only secrets to the new key would brick
+        // them. Instead we park it as a pending rotation; a key-holding step
+        // (vault_unlock / post-sync, see vault::apply_pending_rotation) unwraps
+        // the rekey_token with the old key, re-keys every local secret, then
+        // promotes it. Data-only here, so the sync path needs no master key.
+        Some(o) => {
+            let newer = match (o.updated_at.as_deref(), incoming.updated_at.as_deref()) {
+                (Some(a), Some(b)) => b > a,
+                (None, Some(_))    => true,
+                _                  => false,
+            };
+            // Identical meta (same hash differing only by our diff trigger) or
+            // older — ignore. Also ignore a "newer" meta we can't ever adopt
+            // (no token and not the same vault), to avoid a permanently dirty
+            // pending row; the universal new-password fallback is handled at
+            // the vault layer when prev_verifier is present.
+            if newer && (incoming.rekey_token.is_some() || incoming.prev_verifier.is_some()) {
+                db.set_pending_rotation(incoming)?;
+            }
+            Ok(())
+        }
     }
-    Ok(())
 }

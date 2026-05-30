@@ -219,3 +219,35 @@
     margin-top: 4px;
     justify-content: flex-end;
 }
+
+/* Spinner / success state on the Change Password submit button */
+.cpw-submit-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.cpw-spinner,
+.cpw-check {
+    display: none;
+    flex-shrink: 0;
+}
+.cpw-submit-btn.is-loading .cpw-spinner {
+    display: block;
+    animation: cpw-spin 0.9s linear infinite;
+}
+.cpw-submit-btn.is-success {
+    background: var(--green, #22c55e) !important;
+    color: #0a0a0c !important;
+}
+.cpw-submit-btn.is-success .cpw-check {
+    display: block;
+    animation: cpw-check-pop 320ms ease-out;
+}
+@keyframes cpw-spin {
+    to { transform: rotate(360deg); }
+}
+@keyframes cpw-check-pop {
+    0%   { transform: scale(0.7); opacity: 0; }
+    60%  { transform: scale(1.1); opacity: 1; }
+    100% { transform: scale(1);   opacity: 1; }
+}

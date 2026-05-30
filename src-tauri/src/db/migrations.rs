@@ -109,6 +109,24 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
             created_at  TEXT NOT NULL,
             updated_at  TEXT
         );
+
+        -- A vault_meta received over sync that is newer than ours, parked here
+        -- until a key-holding step (unlock / post-sync) can re-wrap local
+        -- secrets to the new key and promote it. Data-only; no key required to
+        -- write it, so the sync transport never needs the master key.
+        CREATE TABLE IF NOT EXISTS pending_vault_rotation (
+            id            INTEGER PRIMARY KEY CHECK(id = 1),
+            kdf           TEXT NOT NULL,
+            salt          TEXT NOT NULL,
+            m_cost        INTEGER NOT NULL,
+            t_cost        INTEGER NOT NULL,
+            p_cost        INTEGER NOT NULL,
+            verifier      TEXT NOT NULL,
+            rekey_token   TEXT,
+            prev_salt     TEXT,
+            prev_verifier TEXT,
+            updated_at    TEXT
+        );
         "
     )?;
 
@@ -125,6 +143,18 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
     // vault_meta gained updated_at after v1.
     if !column_exists(conn, "vault_meta", "updated_at") {
         let _ = conn.execute("ALTER TABLE vault_meta ADD COLUMN updated_at TEXT", []);
+    }
+
+    // vault_meta gained a re-wrap token + the previous salt/verifier so a
+    // password rotation can be adopted by peers without the new password.
+    if !column_exists(conn, "vault_meta", "rekey_token") {
+        let _ = conn.execute("ALTER TABLE vault_meta ADD COLUMN rekey_token TEXT", []);
+    }
+    if !column_exists(conn, "vault_meta", "prev_salt") {
+        let _ = conn.execute("ALTER TABLE vault_meta ADD COLUMN prev_salt TEXT", []);
+    }
+    if !column_exists(conn, "vault_meta", "prev_verifier") {
+        let _ = conn.execute("ALTER TABLE vault_meta ADD COLUMN prev_verifier TEXT", []);
     }
 
     // ssh_keys gained updated_at so master-password re-encryption (and edits)

@@ -176,6 +176,30 @@ pub fn make_verifier(master_key: &MasterKey) -> Result<Envelope, CryptoError> {
     encrypt(VERIFIER_PLAINTEXT.as_bytes(), master_key, b"vault-verify")
 }
 
+/// AAD for the master-key re-wrap token used during password rotation.
+pub const REKEY_AAD: &[u8] = b"vault-rekey";
+
+/// Wrap (encrypt) `new_key` under `old_key`. Shipped in `vault_meta` during
+/// rotation so a paired peer that still holds the old key can recover the new
+/// key without learning the new password — and thus re-encrypt its local-only
+/// secrets without bricking them. The token is only meaningful to a holder of
+/// the old key and only travels inside the encrypted sync session.
+pub fn wrap_master_key(new_key: &MasterKey, old_key: &MasterKey) -> Result<Envelope, CryptoError> {
+    encrypt(&new_key.0, old_key, REKEY_AAD)
+}
+
+/// Inverse of [`wrap_master_key`]: recover the new master key from the token
+/// using the old key.
+pub fn unwrap_master_key(token: &Envelope, old_key: &MasterKey) -> Result<MasterKey, CryptoError> {
+    let pt = decrypt(token, old_key, REKEY_AAD)?;
+    if pt.len() != ARGON2_OUT_LEN {
+        return Err(CryptoError::Decrypt);
+    }
+    let mut out = [0u8; ARGON2_OUT_LEN];
+    out.copy_from_slice(&pt);
+    Ok(MasterKey(out))
+}
+
 /// Confirm that `master_key` matches the stored verifier.
 pub fn verify(master_key: &MasterKey, verifier: &Envelope) -> Result<(), CryptoError> {
     let pt = decrypt(verifier, master_key, b"vault-verify")?;
@@ -234,6 +258,22 @@ mod tests {
         let v = make_verifier(&key).unwrap();
         let bad = derive_key("wrong", &kdf).unwrap();
         assert!(verify(&bad, &v).is_err());
+    }
+
+    #[test]
+    fn rekey_token_roundtrip() {
+        let old_kdf = KdfParams::new_random();
+        let old = derive_key("old-pw", &old_kdf).unwrap();
+        let new_kdf = KdfParams::new_random();
+        let new = derive_key("new-pw", &new_kdf).unwrap();
+
+        let token = wrap_master_key(&new, &old).unwrap();
+        let recovered = unwrap_master_key(&token, &old).unwrap();
+        assert_eq!(recovered.0, new.0);
+
+        // A different (wrong) old key must not unwrap the token.
+        let wrong = derive_key("wrong", &old_kdf).unwrap();
+        assert!(unwrap_master_key(&token, &wrong).is_err());
     }
 
     #[test]

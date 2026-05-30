@@ -15,6 +15,7 @@ import {
     renderAccentSwatches,
 } from '../utils/accent-themes.js';
 import * as api      from '../api.js';
+import { showConfirm } from '../components/modal.js';
 
 // ─── Section builders ──────────────────────────────────────
 
@@ -208,7 +209,13 @@ async function refreshPeers() {
         });
         listEl.querySelectorAll('[data-remove]').forEach(btn => {
             btn.addEventListener('click', async () => {
-                if (!confirm('Remove this paired device?')) return;
+                const ok = await showConfirm({
+                    title: 'Remove device',
+                    message: 'Remove this paired device?',
+                    confirmText: 'Remove',
+                    danger: true,
+                });
+                if (!ok) return;
                 await api.peerRemove(btn.dataset.remove);
                 refreshPeers();
             });
@@ -319,7 +326,11 @@ function openChangePasswordModal() {
                 <div class="cpw-error" id="cpw-error"></div>
                 <div class="pair-actions">
                     <button type="button" class="btn btn-secondary" id="cpw-cancel">Cancel</button>
-                    <button type="submit" class="btn btn-primary" id="cpw-submit">Change password</button>
+                    <button type="submit" class="btn btn-primary cpw-submit-btn" id="cpw-submit">
+                        <svg class="cpw-spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>
+                        <svg class="cpw-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                        <span class="cpw-submit-label">Change password</span>
+                    </button>
                 </div>
             </form>
         </div>`;
@@ -329,8 +340,9 @@ function openChangePasswordModal() {
     const current  = overlay.querySelector('input[name="current"]');
     const next     = overlay.querySelector('input[name="next"]');
     const confirm  = overlay.querySelector('input[name="confirm"]');
-    const errEl    = overlay.querySelector('#cpw-error');
-    const submitEl = overlay.querySelector('#cpw-submit');
+    const errEl       = overlay.querySelector('#cpw-error');
+    const submitEl    = overlay.querySelector('#cpw-submit');
+    const submitLabel = submitEl.querySelector('.cpw-submit-label');
 
     const close = () => overlay.remove();
     overlay.querySelector('#cpw-cancel').addEventListener('click', close);
@@ -346,15 +358,22 @@ function openChangePasswordModal() {
         if (next.value === current.value){ errEl.textContent = 'New password must differ from the current one'; return; }
 
         submitEl.disabled = true;
-        submitEl.textContent = 'Re-encrypting…';
+        submitEl.classList.add('is-loading');
+        submitLabel.textContent = 'Re-encrypting…';
+        await new Promise(r => setTimeout(r, 30));
         try {
             await api.vaultChangePassword(current.value, next.value);
+            submitEl.classList.remove('is-loading');
+            submitEl.classList.add('is-success');
+            submitLabel.textContent = 'Done';
+            await new Promise(r => setTimeout(r, 600));
             close();
             showToast('Master password changed', 'success');
         } catch (err) {
+            submitEl.classList.remove('is-loading');
             errEl.textContent = String(err);
             submitEl.disabled = false;
-            submitEl.textContent = 'Change password';
+            submitLabel.textContent = 'Change password';
             current.select();
         }
     });

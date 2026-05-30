@@ -1,7 +1,7 @@
 {
   "name": "secureshell-pro",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.2.0",
   "license": "AGPL-3.0-only",
   "description": "A secure desktop SSH workspace for hosts, keys, snippets, terminal sessions, and encrypted LAN sync.",
   "type": "module",
