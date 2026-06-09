@@ -3,7 +3,7 @@
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
 [![Platform: Linux · Windows](https://img.shields.io/badge/Platform-Linux%20·%20Windows-informational)]()
 [![Built with Tauri 2](https://img.shields.io/badge/Built%20with-Tauri%202-ffc131?logo=tauri&logoColor=white)]()
-[![Version](https://img.shields.io/badge/Version-1.0.0-brightgreen)]()
+[![Version](https://img.shields.io/badge/Version-1.3.1-brightgreen)]()
 
 A private, local-first desktop SSH workspace for managing remote hosts, private keys, reusable command snippets, terminal sessions, SFTP file transfers, and encrypted LAN sync — all without a cloud account.
 
