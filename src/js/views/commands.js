@@ -81,6 +81,9 @@ function renderCard(snip, index) {
 
     return `
         <div class="host-card snippet-card" data-id="${snip.id}" style="animation-delay:${index * 30}ms">
+            <span class="host-card-drag" title="Drag to reorder">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="9" cy="6" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="18" r="1"/></svg>
+            </span>
             <div class="host-card-body">
                 <div class="host-card-top">
                     <span class="host-card-name">${escHtml(snip.label)}</span>
@@ -135,6 +138,7 @@ function renderList() {
     listEl.innerHTML = renderListItems(filtered);
 
     if (listEl.querySelector('.host-folder-section')) folderCollapse.bind(listEl);
+    wireDragReorder(listEl, filtered, filterQuery);
     bindCardClicks(listEl);
 }
 
@@ -213,9 +217,222 @@ function runSnippet(snip) {
     runSnippetCommand(snip.command);
 }
 
+function wireDragReorder(listEl, filtered, filter) {
+    if (filter) return;
+
+    let drag = null;
+    let rafId = 0;
+    let lastX = 0, lastY = 0;
+    let currentTarget = null;
+    let currentAbove  = null;
+
+    const findTargetCard = (x, y, excludeId, scopeEl) => {
+        let el = document.elementFromPoint(x, y);
+        let origEl = el;
+        while (el && !el.classList?.contains('host-card') && !el.classList?.contains('host-folder-header')) {
+            el = el.parentElement;
+        }
+        if (!el) {
+            let section = origEl?.closest('.host-folder-section');
+            if (!section) {
+                const list = origEl?.closest('.hosts-list, .host-folder-items');
+                if (list) {
+                    const sections = list.querySelectorAll('.host-folder-section');
+                    if (sections.length > 0) section = sections[sections.length - 1];
+                }
+            }
+            if (section) {
+                let cards = Array.from(section.querySelectorAll('.host-card')).filter(c => c.dataset.id !== excludeId);
+                if (cards.length > 0) return cards[cards.length - 1];
+                return section.querySelector('.host-folder-header');
+            }
+            const list = origEl?.closest('.hosts-list, .host-folder-items');
+            if (list) {
+                let cards = Array.from(list.querySelectorAll('.host-card')).filter(c => c.dataset.id !== excludeId);
+                if (cards.length > 0) return cards[cards.length - 1];
+            }
+            return null;
+        }
+        if (el.classList.contains('host-card') && el.dataset.id === excludeId) return null;
+        if (scopeEl && !scopeEl.contains(el)) return null;
+        return el;
+    };
+
+    const setDropMarker = (target, above) => {
+        if (currentTarget && currentTarget !== target) {
+            currentTarget.classList.remove('drop-above', 'drop-below');
+        }
+        if (target && target.classList.contains('host-card')) {
+            if (target !== currentTarget || above !== currentAbove) {
+                target.classList.remove('drop-above', 'drop-below');
+                target.classList.add(above ? 'drop-above' : 'drop-below');
+            }
+        } else if (target && target.classList.contains('host-folder-header')) {
+            if (target !== currentTarget) {
+                target.classList.add('drop-above');
+            }
+        }
+        currentTarget = target;
+        currentAbove  = above;
+    };
+
+    const renderFrame = () => {
+        rafId = 0;
+        if (!drag) return;
+        const x = lastX - drag.offsetX;
+        const y = lastY - drag.offsetY;
+        drag.ghostEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+
+        const target = findTargetCard(lastX, lastY, drag.id, drag.scopeEl);
+        if (!target) {
+            setDropMarker(null, null);
+            return;
+        }
+        let above = false;
+        if (target.classList.contains('host-card')) {
+            const r = target.getBoundingClientRect();
+            above = lastY < r.top + r.height / 2;
+        }
+        setDropMarker(target, above);
+    };
+
+    const onPointerMove = (e) => {
+        if (!drag) return;
+        e.preventDefault();
+        lastX = e.clientX;
+        lastY = e.clientY;
+        if (!rafId) rafId = requestAnimationFrame(renderFrame);
+    };
+
+    const onPointerUp = async (e) => {
+        if (!drag) return;
+        if (rafId) { cancelAnimationFrame(rafId); rafId = 0; }
+
+        const sourceEl = drag.sourceEl;
+        const scopeEl  = drag.scopeEl;
+        const target = currentTarget || findTargetCard(e.clientX, e.clientY, drag.id, scopeEl);
+        let above = currentAbove;
+        if (target && target.classList.contains('host-card') && currentAbove == null) {
+            above = e.clientY < target.getBoundingClientRect().top + target.getBoundingClientRect().height / 2;
+        }
+
+        const fromId = drag.id;
+
+        drag.ghostEl.remove();
+        sourceEl.classList.remove('is-dragging');
+        if (currentTarget) currentTarget.classList.remove('drop-above', 'drop-below');
+        currentTarget = null;
+        currentAbove  = null;
+
+        window.removeEventListener('pointermove',   onPointerMove);
+        window.removeEventListener('pointerup',     onPointerUp);
+        window.removeEventListener('pointercancel', onPointerUp);
+        drag = null;
+
+        if (!target) return;
+
+        let changed = false;
+
+        if (target.classList.contains('host-folder-header')) {
+            let targetGroupId = target.closest('.host-folder-section')?.dataset.folderId;
+            if (targetGroupId === '__unfiled__') targetGroupId = null;
+
+            const fromIdx = items.findIndex(i => i.id === fromId);
+            if (fromIdx >= 0) {
+                const [removed] = items.splice(fromIdx, 1);
+                removed.group_id = targetGroupId;
+                const folderItems = items.filter(i => (i.group_id || null) === targetGroupId);
+                if (folderItems.length > 0) {
+                    const lastItem = folderItems[folderItems.length - 1];
+                    const insertAt = items.findIndex(i => i.id === lastItem.id) + 1;
+                    items.splice(insertAt, 0, removed);
+                } else {
+                    items.push(removed);
+                }
+                changed = true;
+            }
+        } else if (target.classList.contains('host-card')) {
+            const toId = target.dataset.id;
+            if (fromId === toId) return;
+
+            const fromIdx = items.findIndex(i => i.id === fromId);
+            if (fromIdx >= 0) {
+                const removed = items[fromIdx];
+                const toItem = items.find(i => i.id === toId);
+                if (toItem) {
+                    items.splice(fromIdx, 1);
+                    removed.group_id = toItem.group_id;
+                    const insertAt = items.findIndex(i => i.id === toId) + (above ? 0 : 1);
+                    items.splice(insertAt, 0, removed);
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed) {
+            let toSave = [];
+            let globalOrder = 0;
+            for (let s of items) {
+                let sChanged = false;
+                if ((s.sort_order || 0) !== globalOrder) {
+                    s.sort_order = globalOrder;
+                    sChanged = true;
+                }
+                if (s.id === fromId) {
+                    sChanged = true;
+                }
+                if (sChanged) {
+                    s.updated_at = now();
+                    toSave.push(s);
+                }
+                globalOrder++;
+            }
+
+            for (let s of toSave) {
+                await api.saveSnippet(s);
+            }
+            renderList();
+        }
+    };
+
+    listEl.querySelectorAll('.host-card-drag').forEach(handle => {
+        handle.addEventListener('pointerdown', (e) => {
+            if (e.button !== 0) return;
+            e.preventDefault();
+            e.stopPropagation();
+            closeActionMenu();
+            const card = handle.closest('.host-card');
+            if (!card) return;
+            const rect = card.getBoundingClientRect();
+
+            const ghost = card.cloneNode(true);
+            ghost.classList.add('host-card-ghost');
+            ghost.style.width  = rect.width + 'px';
+            ghost.style.transform = `translate3d(${rect.left}px, ${rect.top}px, 0)`;
+            document.body.appendChild(ghost);
+
+            card.classList.add('is-dragging');
+            drag = {
+                id: card.dataset.id,
+                sourceEl: card,
+                scopeEl: card.closest('.hosts-list'), 
+                ghostEl: ghost,
+                offsetX: e.clientX - rect.left,
+                offsetY: e.clientY - rect.top,
+            };
+            lastX = e.clientX;
+            lastY = e.clientY;
+            window.addEventListener('pointermove',   onPointerMove);
+            window.addEventListener('pointerup',     onPointerUp);
+            window.addEventListener('pointercancel', onPointerUp);
+        });
+    });
+}
+
 function bindCardClicks(listEl) {
     listEl.querySelectorAll('.host-card').forEach(card => {
         card.addEventListener('dblclick', (e) => {
+            if (e.target.closest('.host-card-drag')) return;
             e.preventDefault();
             const snip = items.find(s => s.id === card.dataset.id);
             if (!snip) return;
@@ -224,6 +441,7 @@ function bindCardClicks(listEl) {
         });
 
         card.addEventListener('contextmenu', (e) => {
+            if (e.target.closest('.host-card-drag')) return;
             e.preventDefault();
             e.stopPropagation();
             const snip = items.find(s => s.id === card.dataset.id);
@@ -372,7 +590,7 @@ function newItemTemplate() {
     return {
         id: generateId(), label: '', command: '', description: null,
         tags: [], connection_ids: [], group_id: null,
-        created_at: now(), updated_at: now(), synced: false,
+        created_at: now(), updated_at: now(), synced: false, sort_order: 0,
     };
 }
 
@@ -435,7 +653,7 @@ async function loadData() {
     ]);
     availableHosts = hosts;
     items = await api.getSnippets();
-    items.sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+    items.sort((a, b) => (a.sort_order || 0) - (b.sort_order || 0) || (a.label || '').localeCompare(b.label || ''));
     renderList();
 }
 

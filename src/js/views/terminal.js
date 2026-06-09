@@ -322,7 +322,10 @@ function promptSnippetVars(vars) {
 async function pasteIntoSession(sessionId) {
     try {
         const text = await clipboardReadText();
-        if (text) await api.sshWrite(sessionId, text);
+        if (text) {
+            const processedText = text.replace(/\r?\n/g, '\r');
+            await api.sshWrite(sessionId, processedText);
+        }
     } catch (err) {
         showToast('Paste failed: ' + err, 'error');
     }
@@ -330,7 +333,8 @@ async function pasteIntoSession(sessionId) {
 
 function pasteTextIntoSession(sessionId, text) {
     if (!text) return;
-    api.sshWrite(sessionId, text).catch(err => {
+    const processedText = text.replace(/\r?\n/g, '\r');
+    api.sshWrite(sessionId, processedText).catch(err => {
         showToast('Paste failed: ' + err, 'error');
     });
 }

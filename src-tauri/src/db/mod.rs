@@ -408,7 +408,7 @@ impl Database {
     pub fn get_all_snippets(&self) -> Result<Vec<Snippet>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, label, command, description, tags, connection_ids, group_id, created_at, updated_at, synced FROM snippets ORDER BY label ASC")
+            .prepare("SELECT id, label, command, description, tags, connection_ids, group_id, created_at, updated_at, synced, sort_order FROM snippets ORDER BY sort_order ASC, label ASC")
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
@@ -419,6 +419,7 @@ impl Database {
                 let connection_ids: Vec<String> =
                     serde_json::from_str(&conn_ids_str).unwrap_or_default();
                 let synced_int: i32 = row.get(9)?;
+                let sort_order: i32 = row.get(10).unwrap_or(0);
 
                 Ok(Snippet {
                     id: row.get(0)?,
@@ -431,6 +432,7 @@ impl Database {
                     created_at: row.get(7)?,
                     updated_at: row.get(8)?,
                     synced: synced_int != 0,
+                    sort_order,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -448,7 +450,7 @@ impl Database {
         let conn_ids_json = serde_json::to_string(&snippet.connection_ids).unwrap_or_default();
 
         conn.execute(
-            "INSERT OR REPLACE INTO snippets (id, label, command, description, tags, connection_ids, group_id, created_at, updated_at, synced) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT OR REPLACE INTO snippets (id, label, command, description, tags, connection_ids, group_id, created_at, updated_at, synced, sort_order) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             rusqlite::params![
                 snippet.id,
                 snippet.label,
@@ -460,6 +462,7 @@ impl Database {
                 snippet.created_at,
                 snippet.updated_at,
                 snippet.synced as i32,
+                snippet.sort_order,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -830,7 +833,7 @@ impl Database {
         let sql = match table {
             "connections" => "SELECT id, name, host, port, username, auth_method, password, key_id, group_id, tags, color, last_connected, created_at, updated_at, deleted_at FROM connections WHERE id = ?1",
             "ssh_keys"    => "SELECT id, label, key_type, public_key, private_key, fingerprint, created_at, updated_at, deleted_at FROM ssh_keys WHERE id = ?1",
-            "snippets"    => "SELECT id, label, command, description, tags, connection_ids, group_id, created_at, updated_at, deleted_at FROM snippets WHERE id = ?1",
+            "snippets"    => "SELECT id, label, command, description, tags, connection_ids, group_id, sort_order, created_at, updated_at, deleted_at FROM snippets WHERE id = ?1",
             "groups"      => "SELECT id, name, parent_id, icon, color, created_at, deleted_at FROM groups WHERE id = ?1",
             _             => return Err(format!("unknown sync table {}", table)),
         };
@@ -873,7 +876,7 @@ impl Database {
         let columns: &[&str] = match table {
             "connections" => &["id","name","host","port","username","auth_method","password","key_id","group_id","tags","color","last_connected","created_at","updated_at","deleted_at"],
             "ssh_keys"    => &["id","label","key_type","public_key","private_key","fingerprint","created_at","updated_at","deleted_at"],
-            "snippets"    => &["id","label","command","description","tags","connection_ids","group_id","created_at","updated_at","deleted_at"],
+            "snippets"    => &["id","label","command","description","tags","connection_ids","group_id","sort_order","created_at","updated_at","deleted_at"],
             "groups"      => &["id","name","parent_id","icon","color","created_at","deleted_at"],
             _             => return Err(format!("unknown sync table {}", table)),
         };

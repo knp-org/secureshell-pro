@@ -140,6 +140,10 @@ pub fn run_migrations(conn: &Connection) -> Result<(), rusqlite::Error> {
         let _ = conn.execute("ALTER TABLE snippets ADD COLUMN group_id TEXT", []);
     }
 
+    if !column_exists(conn, "snippets", "sort_order") {
+        let _ = conn.execute("ALTER TABLE snippets ADD COLUMN sort_order INTEGER DEFAULT 0", []);
+    }
+
     // vault_meta gained updated_at after v1.
     if !column_exists(conn, "vault_meta", "updated_at") {
         let _ = conn.execute("ALTER TABLE vault_meta ADD COLUMN updated_at TEXT", []);

@@ -45,6 +45,8 @@ pub struct Snippet {
     pub created_at: String,
     pub updated_at: String,
     pub synced: bool,
+    #[serde(default)]
+    pub sort_order: i32,
 }
 
 /// SSH Key
