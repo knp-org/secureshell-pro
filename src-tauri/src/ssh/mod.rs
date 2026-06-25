@@ -163,6 +163,8 @@ impl SshManager {
     ) -> Result<(), String> {
         // Build the ssh command
         let mut cmd = CommandBuilder::new("ssh");
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("COLORTERM", "truecolor");
         cmd.arg(format!("{}@{}", username, host));
         cmd.arg("-p");
         cmd.arg(port.to_string());
@@ -180,6 +182,8 @@ impl SshManager {
         if let Some(pwd) = password {
             if !pwd.is_empty() {
                 let mut sshpass_cmd = CommandBuilder::new("sshpass");
+                sshpass_cmd.env("TERM", "xterm-256color");
+                sshpass_cmd.env("COLORTERM", "truecolor");
                 // if it's a key passphrase, sshpass -P passphrase doesn't work easily with standard sshpass.
                 // standard sshpass only supports password auth, but sshpass -P "passphrase" is a patched version.
                 // Assuming standard sshpass usage for password authentication:
