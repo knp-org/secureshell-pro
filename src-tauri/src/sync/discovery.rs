@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
 use std::time::Duration;
 
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
+use mdns_sd::{Receiver, ServiceDaemon, ServiceEvent, ServiceInfo};
 
 pub const SERVICE_TYPE: &str = "_secureshellsync._tcp.local.";
 /// Instance-name prefix of the steady-state sync listener, as opposed to the
@@ -26,6 +26,22 @@ pub struct Advertisement {
     pub port: u16,
     pub pk_hex: String,
     pub label: String,
+}
+
+/// mdns-sd answers `unregister` and `shutdown` on a channel it hands back.
+/// Dropping that receiver — which `let _ = ...` does — leaves the daemon
+/// sending its reply into a closed channel, so it logs at ERROR:
+///
+///   `exit: failed to send response of shutdown: sending on a closed channel`
+///
+/// Waiting costs a few milliseconds. It also matters for `unregister`: the
+/// daemon has to get its goodbye packet out before the `shutdown` that follows
+/// tears it down, or peers keep a service alive in their caches that has
+/// actually gone away.
+fn settle<T>(response: Result<Receiver<T>, mdns_sd::Error>) {
+    if let Ok(receiver) = response {
+        let _ = receiver.recv_timeout(Duration::from_secs(1));
+    }
 }
 
 pub struct Advertiser {
@@ -61,8 +77,8 @@ impl Advertiser {
     }
 
     pub fn stop(self) {
-        let _ = self.daemon.unregister(&self.full_name);
-        let _ = self.daemon.shutdown();
+        settle(self.daemon.unregister(&self.full_name));
+        settle(self.daemon.shutdown());
     }
 }
 
@@ -103,7 +119,7 @@ pub async fn find_peer(wanted_pk_hex: &str, timeout: Duration) -> Result<Option<
                     let sock = std::net::SocketAddr::new(*addr, info.get_port());
                     let peer = DiscoveredPeer { pk_hex: pk, label, addr: sock };
                     if info.get_fullname().starts_with(SYNC_INSTANCE_PREFIX) {
-                        let _ = daemon.shutdown();
+                        settle(daemon.shutdown());
                         return Ok(Some(peer));
                     }
                     fallback.get_or_insert(peer);
@@ -111,7 +127,7 @@ pub async fn find_peer(wanted_pk_hex: &str, timeout: Duration) -> Result<Option<
             }
         }
     }
-    let _ = daemon.shutdown();
+    settle(daemon.shutdown());
     Ok(fallback)
 }
 
@@ -159,7 +175,7 @@ pub async fn browse_all(timeout: Duration) -> Result<Vec<DiscoveredPeer>, String
             }
         }
     }
-    let _ = daemon.shutdown();
+    settle(daemon.shutdown());
     Ok(found)
 }
 
