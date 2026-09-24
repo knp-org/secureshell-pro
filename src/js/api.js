@@ -83,6 +83,8 @@ export async function pairingStart()          { return await invoke('pairing_sta
 export async function pairingCancel()         { return await invoke('pairing_cancel'); }
 export async function pairingStatus()         { return await invoke('pairing_status'); }
 export async function pairingConfirm(accept)  { return await invoke('pairing_confirm', { accept }); }
+export async function pairingJoin(host, port, code) { return await invoke('pairing_join', { host, port, code }); }
+export async function syncDiscover()          { return await invoke('sync_discover'); }
 export async function peersList()             { return await invoke('peers_list'); }
 export async function peerRemove(id)          { return await invoke('peer_remove', { id }); }
 export async function syncNow(peerId)         { return await invoke('sync_now',    { peerId }); }

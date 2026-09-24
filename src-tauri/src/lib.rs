@@ -52,6 +52,8 @@ pub fn run() {
             sync::pairing_cancel,
             sync::pairing_status,
             sync::pairing_confirm,
+            sync::pairing_join,
+            sync::sync_discover,
             sync::peers_list,
             sync::peer_remove,
             sync::sync_now,

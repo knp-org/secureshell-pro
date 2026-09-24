@@ -2,15 +2,23 @@
 //
 // Lifecycle:
 //
-//   1. `PairingSession::start(identity, sync_listener_port)` — generates a one-shot 32-byte PSK,
-//      binds a random TCP port, starts mDNS advertisement, returns a
-//      `PairingInvite` containing the QR payload (also rendered to SVG).
+//   1. `PairingSession::start(identity, sync_listener_port)` — generates a one-shot
+//      pairing code, derives the 32-byte PSK from it, binds a random TCP port,
+//      starts mDNS advertisement, and returns a `PairingInvite` holding both the
+//      QR payload (rendered to SVG, for the Android app) and the typable code
+//      (for another desktop).
 //   2. A background tokio task accepts the first incoming TCP connection.
-//      Two protocols are supported:
-//      a. Desktop-to-desktop: Noise IKpsk2 handshake → SAS from handshake hash.
-//      b. Mobile pairing: AES-GCM(PSK) encrypted key exchange → SAS from shared inputs.
+//      Three protocols are supported, told apart by the first frame:
+//      a. Desktop joining with the code: Noise XXpsk3 → SAS from handshake hash.
+//      b. Desktop scanning the QR: Noise IKpsk2 → SAS from handshake hash.
+//      c. Mobile pairing: AES-GCM(PSK) encrypted key exchange → SAS from shared inputs.
 //   3. `confirm(accept)` either persists the peer in the trust store or
 //      discards everything.
+//
+// The other half is `PairingSession::join(..)`: the desktop where the user types
+// the code. It dials the host's sync listener, is routed to the host's waiting
+// session, and runs the XXpsk3 handshake as initiator. From `confirm` onwards
+// both sides behave identically.
 
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
@@ -36,6 +44,12 @@ pub struct PairingInvite {
     pub qr_svg: String,
     pub ip:   String,
     pub port: u16,
+    /// Human-typable pairing code, shown so it can be entered on another
+    /// desktop. The PSK is derived from it, so it is as sensitive as the QR.
+    pub code: String,
+    /// False when the fixed sync port could not be bound, in which case another
+    /// desktop has no well-known port to dial and only QR pairing works.
+    pub code_pairing: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -44,6 +58,8 @@ pub struct PairingInvite {
 pub enum PairingStatus {
     Idle,
     Listening { invite: PairingInvite },
+    /// Join side: dialling the host and running the handshake.
+    Connecting { host: String },
     AwaitingConfirmation {
         sas: String,
         peer_pk_hex: String,
@@ -54,7 +70,8 @@ pub enum PairingStatus {
 }
 
 pub struct PairingSession {
-    pub invite: PairingInvite,
+    /// Present on the hosting side only; the joining side has nothing to show.
+    pub invite: Option<PairingInvite>,
     inner: Arc<Mutex<Inner>>,
     advertiser: Option<Advertiser>,
     cancel_tx: Option<oneshot::Sender<()>>,
@@ -91,8 +108,8 @@ impl PairingSession {
         sync_listener_port: Option<u16>,
         pair_rx: std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<TcpStream>>>,
     ) -> Result<Self, String> {
-        let mut psk = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut psk);
+        let code = transport::generate_pairing_code();
+        let psk = transport::pairing_psk(&code)?;
 
         // Also bind a random port for desktop-to-desktop pairing (Noise IK).
         let listener = TcpListener::bind("0.0.0.0:0").await.map_err(|e| e.to_string())?;
@@ -120,6 +137,8 @@ impl PairingSession {
             qr_svg,
             ip: ip.clone(),
             port,
+            code,
+            code_pairing: sync_listener_port.is_some(),
         };
 
         let instance = format!("secureshell-{}", &identity.pk_hex[..8]);
@@ -170,9 +189,69 @@ impl PairingSession {
         });
 
         Ok(Self {
-            invite,
+            invite: Some(invite),
             inner,
             advertiser,
+            cancel_tx: Some(cancel_tx),
+            device_label,
+        })
+    }
+
+    /// The other half of code pairing: dial a desktop that is showing a pairing
+    /// code and run the XXpsk3 handshake as initiator. Reaches the host's
+    /// waiting session through its sync listener's `pair` route, so the user
+    /// only has to type the host's address and the code.
+    pub async fn join(
+        identity: DeviceIdentity,
+        host: String,
+        port: u16,
+        code: String,
+    ) -> Result<Self, String> {
+        // Fail fast on a typo before opening any connection.
+        let psk = transport::pairing_psk(&code)?;
+        let device_label = identity.label.clone();
+
+        let inner = Arc::new(Mutex::new(Inner {
+            status: Some(PairingStatus::Connecting { host: host.clone() }),
+            ..Default::default()
+        }));
+        let (cancel_tx, cancel_rx) = oneshot::channel();
+        let inner_task = inner.clone();
+        let identity_task = identity.clone();
+
+        tauri::async_runtime::spawn(async move {
+            tokio::select! {
+                _ = cancel_rx => {
+                    let mut g = inner_task.lock().unwrap();
+                    g.status = Some(PairingStatus::Failed { reason: "cancelled".into() });
+                }
+                res = run_initiator(host, port, identity_task, psk) => {
+                    let mut g = inner_task.lock().unwrap();
+                    match res {
+                        Ok(outcome) => {
+                            g.pending_peer = Some(PendingPeer {
+                                pk_hex: outcome.peer_pk_hex.clone(),
+                                label:  outcome.peer_label.clone(),
+                                shared_secret: outcome.shared_secret,
+                                psk: outcome.psk,
+                            });
+                            g.pending_transport = Some(outcome.transport);
+                            g.status = Some(PairingStatus::AwaitingConfirmation {
+                                sas: outcome.sas,
+                                peer_pk_hex: outcome.peer_pk_hex,
+                                peer_label: outcome.peer_label,
+                            });
+                        }
+                        Err(e) => g.status = Some(PairingStatus::Failed { reason: e }),
+                    }
+                }
+            }
+        });
+
+        Ok(Self {
+            invite: None,
+            inner,
+            advertiser: None,
             cancel_tx: Some(cancel_tx),
             device_label,
         })
@@ -268,8 +347,9 @@ async fn run_responder(
     psk: [u8; 32],
 ) -> Result<ResponderOutcome, String> {
     // Accept from either:
-    // - The random pairing port (desktop-to-desktop Noise IK)
-    // - The channel from the sync listener (mobile pairing routed via port 43951)
+    // - The random pairing port advertised in the QR (a QR scanner, Noise IK)
+    // - The channel from the sync listener on port 43951, which carries both
+    //   mobile pairing and a desktop joining with the typed code
     let mut stream = tokio::select! {
         res = listener.accept() => {
             res.map_err(|e| e.to_string())?.0
@@ -287,7 +367,16 @@ async fn run_responder(
     let mut frame = vec![0u8; frame_len];
     stream.read_exact(&mut frame).await.map_err(|e| e.to_string())?;
 
-    // Detect protocol: try AES-GCM decrypt with PSK. If it succeeds and
+    // Detect protocol from the first frame by length. A code-pairing dial opens
+    // with an ephemeral key and an empty payload, which nothing else we speak
+    // can match: an IK first message carries a static key too (96 bytes), and a
+    // mobile frame is a nonce plus the ciphertext of a JSON object holding a
+    // 64-character hex secret.
+    if frame.len() == transport::XX_FIRST_MESSAGE_LEN {
+        return handle_code_pairing(stream, &identity, &psk, &frame).await;
+    }
+
+    // Otherwise try AES-GCM decrypt with PSK. If it succeeds and
     // contains a "mobile_pair" message, handle the mobile flow. Otherwise
     // treat the frame as a Noise IK first message.
     if frame.len() >= 28 {
@@ -311,6 +400,112 @@ async fn run_responder(
         shared_secret: None,
         psk,
     })
+}
+
+/// Responder side of code pairing. The label each side shows for the other is
+/// carried inside the handshake, so it is authenticated rather than claimed in
+/// the clear.
+async fn handle_code_pairing(
+    mut stream: TcpStream,
+    identity: &DeviceIdentity,
+    psk: &[u8; 32],
+    first_msg: &[u8],
+) -> Result<ResponderOutcome, String> {
+    let local_sk = identity.secret_bytes()?;
+    let (h, peer_payload) = transport::responder_handshake_xx_with_first_message(
+        &mut stream,
+        &local_sk,
+        psk,
+        first_msg,
+        &encode_pair_payload(&identity.label),
+    )
+    .await?;
+
+    // One encrypted frame so the joining side can tell a wrong code from a
+    // network problem: with a mismatched psk it never arrives.
+    let mut session = Session::new(h.session);
+    session
+        .send(&mut stream, &serde_json::json!({ "type": "pair_ready" }))
+        .await?;
+
+    Ok(ResponderOutcome {
+        peer_pk_hex: hex::encode(h.peer_static),
+        peer_label: decode_pair_payload(&peer_payload),
+        sas: derive_sas(&h.handshake_hash),
+        transport: PendingTransport::Noise(stream, session),
+        shared_secret: None,
+        psk: *psk,
+    })
+}
+
+/// Initiator side of code pairing — see `PairingSession::join`.
+async fn run_initiator(
+    host: String,
+    port: u16,
+    identity: DeviceIdentity,
+    psk: [u8; 32],
+) -> Result<ResponderOutcome, String> {
+    let addr = format!("{host}:{port}");
+    let mut stream = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        TcpStream::connect(&addr),
+    )
+    .await
+    .map_err(|_| format!("Could not reach {addr} — check the address and that both devices are on the same Wi-Fi"))?
+    .map_err(|e| format!("Could not connect to {addr}: {e}"))?;
+
+    // Ask the host's sync listener to hand us to its waiting pairing session.
+    let claim = b"pair";
+    stream
+        .write_all(&(claim.len() as u32).to_be_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
+    stream.write_all(claim).await.map_err(|e| e.to_string())?;
+
+    let local_sk = identity.secret_bytes()?;
+    let (h, peer_payload) = transport::initiator_handshake_xx(
+        &mut stream,
+        &local_sk,
+        &psk,
+        &encode_pair_payload(&identity.label),
+    )
+    .await
+    // The psk only enters an XXpsk3 handshake at the last message, so we never
+    // see a code mismatch as such — the host just hangs up on us. Say so.
+    .map_err(|e| format!("{e} — check the other device is showing a pairing code, and that the code matches"))?;
+
+    // The psk only enters an XXpsk3 handshake in the final message, so a wrong
+    // code fails on the host's side, not ours. This ack is how we find out.
+    let mut session = Session::new(h.session);
+    let ready: serde_json::Value = session
+        .recv(&mut stream)
+        .await
+        .map_err(|_| "Pairing code did not match — check the code on the other device and try again".to_string())?;
+    if ready.get("type").and_then(|v| v.as_str()) != Some("pair_ready") {
+        return Err("Unexpected reply from the other device".into());
+    }
+
+    Ok(ResponderOutcome {
+        peer_pk_hex: hex::encode(h.peer_static),
+        peer_label: decode_pair_payload(&peer_payload),
+        sas: derive_sas(&h.handshake_hash),
+        transport: PendingTransport::Noise(stream, session),
+        shared_secret: None,
+        psk,
+    })
+}
+
+fn encode_pair_payload(label: &str) -> Vec<u8> {
+    serde_json::json!({ "label": label }).to_string().into_bytes()
+}
+
+fn decode_pair_payload(payload: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|v| v.get("label").and_then(|l| l.as_str()).map(str::to_string))
+        .map(|l| l.chars().take(64).collect::<String>())
+        .filter(|l| !l.trim().is_empty())
+        .unwrap_or_else(|| "Desktop".into())
 }
 
 fn try_decrypt_mobile_frame(psk: &[u8; 32], frame: &[u8]) -> Option<serde_json::Value> {
@@ -447,4 +642,99 @@ pub fn derive_mobile_peer_id(device_secret: &[u8]) -> String {
     h.update(b"secureshell-mobile-id-v1");
     h.update(device_secret);
     hex::encode(h.finalize())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity(label: &str, seed: u8) -> DeviceIdentity {
+        let sk = x25519_dalek::StaticSecret::from([seed; 32]);
+        DeviceIdentity {
+            sk_hex: hex::encode(sk.to_bytes()),
+            pk_hex: hex::encode(x25519_dalek::PublicKey::from(&sk).to_bytes()),
+            label: label.into(),
+        }
+    }
+
+    /// Two desktops pair with nothing but a typed code: both end up with the
+    /// other's real public key, the other's label, and the same SAS to compare.
+    #[tokio::test]
+    async fn desktop_code_pairing_meets_in_the_middle() {
+        let host = identity("host-laptop", 21);
+        let joiner = identity("kitchen-pc", 22);
+        let code = transport::generate_pairing_code();
+        let psk = transport::pairing_psk(&code).unwrap();
+
+        // Stands in for listener.rs: reads the `pair` claim off the wire and
+        // hands the stream to the waiting pairing session.
+        let sync_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = sync_listener.local_addr().unwrap().port();
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tokio::spawn(async move {
+            let (mut stream, _) = sync_listener.accept().await.unwrap();
+            let mut len = [0u8; 4];
+            stream.read_exact(&mut len).await.unwrap();
+            let mut claim = vec![0u8; u32::from_be_bytes(len) as usize];
+            stream.read_exact(&mut claim).await.unwrap();
+            assert_eq!(claim, b"pair");
+            tx.send(stream).await.unwrap();
+        });
+
+        // The host also keeps its own QR port open; it stays idle here.
+        let qr_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let responding = run_responder(
+            qr_listener,
+            Arc::new(tokio::sync::Mutex::new(rx)),
+            host.clone(),
+            psk,
+        );
+        // A joiner is allowed to type the code in any shape.
+        let joining = run_initiator(
+            "127.0.0.1".into(),
+            port,
+            joiner.clone(),
+            transport::pairing_psk(&code.to_lowercase()).unwrap(),
+        );
+
+        let (host_side, join_side) = tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            async { tokio::join!(responding, joining) },
+        )
+        .await
+        .unwrap();
+        let host_side = host_side.unwrap();
+        let join_side = join_side.unwrap();
+
+        assert_eq!(host_side.sas, join_side.sas);
+        assert_eq!(host_side.peer_pk_hex, joiner.pk_hex);
+        assert_eq!(join_side.peer_pk_hex, host.pk_hex);
+        assert_eq!(host_side.peer_label, "kitchen-pc");
+        assert_eq!(join_side.peer_label, "host-laptop");
+        // Desktop peers authenticate by key, so no shared secret is stored.
+        assert!(host_side.shared_secret.is_none());
+        assert!(join_side.shared_secret.is_none());
+    }
+
+    #[tokio::test]
+    async fn joining_a_device_that_is_not_pairing_explains_itself() {
+        let joiner = identity("kitchen-pc", 23);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            // Mimic listener.rs refusing the claim: close the connection.
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream);
+        });
+        let err = run_initiator(
+            "127.0.0.1".into(),
+            port,
+            joiner,
+            transport::pairing_psk(&transport::generate_pairing_code()).unwrap(),
+        )
+        .await
+        .err()
+        .expect("joining an idle device must fail");
+        assert!(err.contains("pairing code"), "{err}");
+    }
 }

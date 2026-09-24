@@ -19,7 +19,7 @@ A private, local-first desktop SSH workspace for managing remote hosts, private 
 | **Command Snippets** | Save reusable command snippets, organize them into folders, and execute them directly in terminal sessions. |
 | **Snippet Variables** | Use runtime variables like `{{host}}` or `{{service}}` that prompt for values just before execution. |
 | **SFTP File Browser** | Browse, upload, download, rename, and manage remote files through an integrated dual-pane SFTP interface. |
-| **LAN Sync** | Pair with the Android companion app via QR code and sync hosts, keys, snippets, and groups over your local network. |
+| **LAN Sync** | Sync hosts, keys, snippets, and groups over your local network — between two computers by typing a pairing code, or with the Android companion app by scanning a QR. |
 | **SSH Key Management** | Import, manage, and auto-detect SSH keys from `~/.ssh` for seamless authentication. |
 
 ---

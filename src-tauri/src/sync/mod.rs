@@ -74,12 +74,75 @@ pub async fn pairing_start(
         .map_err(|e| e.to_string())?;
     let pair_rx = state.pair_rx.clone();
     let session = pairing::PairingSession::start(id, sync_port, pair_rx).await?;
-    let invite = session.invite.clone();
+    let invite = session
+        .invite
+        .clone()
+        .ok_or_else(|| "pairing session started without an invite".to_string())?;
     {
         let mut guard = state.pairing.lock().map_err(|e| e.to_string())?;
         *guard = Some(session);
     }
     Ok(invite)
+}
+
+/// Default TCP port of the steady-state sync listener. A desktop joining by
+/// code dials this, and is routed to the host's waiting pairing session.
+pub const DEFAULT_SYNC_PORT: u16 = 43951;
+
+/// Join a desktop that is currently showing a pairing code. Mirrors
+/// `pairing_start`: progress is polled with `pairing_status` and finished with
+/// `pairing_confirm` once the user has compared the 6-digit code.
+#[tauri::command]
+pub async fn pairing_join(
+    db: State<'_, Database>,
+    state: State<'_, SyncState>,
+    host: String,
+    port: Option<u16>,
+    code: String,
+) -> Result<(), String> {
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("Enter the address shown on the other device".into());
+    }
+    let id = state.ensure_identity(&db)?;
+
+    // Replace any session already in flight (e.g. a cancelled attempt).
+    if let Some(previous) = state.pairing.lock().map_err(|e| e.to_string())?.take() {
+        previous.cancel();
+    }
+
+    let session =
+        pairing::PairingSession::join(id, host, port.unwrap_or(DEFAULT_SYNC_PORT), code).await?;
+    let mut guard = state.pairing.lock().map_err(|e| e.to_string())?;
+    *guard = Some(session);
+    Ok(())
+}
+
+/// Browse the LAN for other SecureShell devices, so the join dialog can offer
+/// addresses instead of making the user read an IP off another screen.
+#[tauri::command]
+pub async fn sync_discover(
+    db: State<'_, Database>,
+    state: State<'_, SyncState>,
+) -> Result<Vec<DiscoveredDevice>, String> {
+    let id = state.ensure_identity(&db)?;
+    let found = discovery::browse_all(std::time::Duration::from_secs(3)).await?;
+    Ok(found
+        .into_iter()
+        .filter(|p| p.pk_hex != id.pk_hex)
+        .map(|p| DiscoveredDevice {
+            label: p.label,
+            host: p.addr.ip().to_string(),
+            pk_hex: p.pk_hex,
+        })
+        .collect())
+}
+
+#[derive(serde::Serialize)]
+pub struct DiscoveredDevice {
+    pub label: String,
+    pub host: String,
+    pub pk_hex: String,
 }
 
 #[tauri::command]

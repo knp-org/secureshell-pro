@@ -39,10 +39,14 @@ async fn run(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<SyncState>();
     let identity = state.ensure_identity(&db)?;
 
-    const FIXED_SYNC_PORT: u16 = 43951;
-    let listener = TcpListener::bind(("0.0.0.0", FIXED_SYNC_PORT))
+    let listener = TcpListener::bind(("0.0.0.0", crate::sync::DEFAULT_SYNC_PORT))
         .await
-        .map_err(|e| format!("could not bind sync listener on port {FIXED_SYNC_PORT}: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "could not bind sync listener on port {}: {e}",
+                crate::sync::DEFAULT_SYNC_PORT
+            )
+        })?;
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
 
     {
@@ -52,7 +56,11 @@ async fn run(app: &AppHandle) -> Result<(), String> {
         *g = Some(port);
     }
 
-    let instance = format!("secureshell-sync-{}", &identity.pk_hex[..8]);
+    let instance = format!(
+        "{}{}",
+        crate::sync::discovery::SYNC_INSTANCE_PREFIX,
+        &identity.pk_hex[..8]
+    );
     let _advertiser = Advertiser::start(&Advertisement {
         instance,
         port,
@@ -87,9 +95,19 @@ async fn handle_one(app: &AppHandle, identity: DeviceIdentity, mut stream: TcpSt
     stream.read_exact(&mut buf).await.map_err(|e| e.to_string())?;
     let claimed_pk = std::str::from_utf8(&buf).map_err(|e| e.to_string())?.to_string();
 
-    // Route pairing requests to the active PairingSession.
+    // Route pairing requests to the active PairingSession. Checking first means
+    // a device that dials while nobody is pairing gets its connection closed
+    // rather than sitting in the channel until it times out.
     if claimed_pk == "pair" {
         let state = app.state::<crate::sync::SyncState>();
+        let pairing_active = state
+            .pairing
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false);
+        if !pairing_active {
+            return Err("no active pairing session".into());
+        }
         state.pair_tx.send(stream).await.map_err(|_| "no active pairing session")?;
         return Ok(());
     }

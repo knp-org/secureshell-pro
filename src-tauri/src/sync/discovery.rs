@@ -8,6 +8,9 @@ use std::time::Duration;
 use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 
 pub const SERVICE_TYPE: &str = "_secureshellsync._tcp.local.";
+/// Instance-name prefix of the steady-state sync listener, as opposed to the
+/// temporary one a pairing session advertises on a random port.
+pub const SYNC_INSTANCE_PREFIX: &str = "secureshell-sync-";
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -63,12 +66,19 @@ impl Advertiser {
     }
 }
 
-/// Browse the LAN for `_secureshellsync._tcp` and return the first peer
-/// matching `wanted_pk_hex`, or None if nothing shows up within `timeout`.
+/// Browse the LAN for `_secureshellsync._tcp` and return the peer matching
+/// `wanted_pk_hex`, or None if nothing shows up within `timeout`.
+///
+/// A device that is mid-pairing advertises twice — its sync listener and its
+/// temporary pairing port, under the same public key — so we hold out for the
+/// sync listener and only fall back to another instance once the browse is
+/// over. Connecting to the pairing port would land us in a handshake the other
+/// side isn't running.
 pub async fn find_peer(wanted_pk_hex: &str, timeout: Duration) -> Result<Option<DiscoveredPeer>, String> {
     let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
     let recv = daemon.browse(SERVICE_TYPE).map_err(|e| e.to_string())?;
 
+    let mut fallback: Option<DiscoveredPeer> = None;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -91,14 +101,66 @@ pub async fn find_peer(wanted_pk_hex: &str, timeout: Duration) -> Result<Option<
             if pk == wanted_pk_hex {
                 if let Some(addr) = info.get_addresses().iter().next() {
                     let sock = std::net::SocketAddr::new(*addr, info.get_port());
-                    let _ = daemon.shutdown();
-                    return Ok(Some(DiscoveredPeer { pk_hex: pk, label, addr: sock }));
+                    let peer = DiscoveredPeer { pk_hex: pk, label, addr: sock };
+                    if info.get_fullname().starts_with(SYNC_INSTANCE_PREFIX) {
+                        let _ = daemon.shutdown();
+                        return Ok(Some(peer));
+                    }
+                    fallback.get_or_insert(peer);
                 }
             }
         }
     }
     let _ = daemon.shutdown();
-    Ok(None)
+    Ok(fallback)
+}
+
+/// Browse the LAN for the whole `timeout` and return every device that
+/// answered, one entry per device (both the pairing and the steady-state
+/// listener advertise the same public key).
+pub async fn browse_all(timeout: Duration) -> Result<Vec<DiscoveredPeer>, String> {
+    let daemon = ServiceDaemon::new().map_err(|e| e.to_string())?;
+    let recv = daemon.browse(SERVICE_TYPE).map_err(|e| e.to_string())?;
+
+    let mut found: Vec<DiscoveredPeer> = Vec::new();
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() { break; }
+        let ev = match tokio::time::timeout(remaining, async {
+            tokio::task::spawn_blocking({
+                let recv = recv.clone();
+                move || recv.recv()
+            }).await
+        }).await {
+            Ok(Ok(Ok(ev))) => ev,
+            _ => break,
+        };
+
+        if let ServiceEvent::ServiceResolved(info) = ev {
+            let props = info.get_properties();
+            let pk = props.get("pk").map(|p| p.val_str().to_string()).unwrap_or_default();
+            if pk.is_empty() {
+                continue;
+            }
+            let label = props.get("host").map(|p| p.val_str().to_string()).unwrap_or_default();
+            let Some(addr) = info.get_addresses().iter().next().copied() else { continue };
+            let peer = DiscoveredPeer {
+                pk_hex: pk,
+                label,
+                addr: std::net::SocketAddr::new(addr, info.get_port()),
+            };
+            let is_sync = info.get_fullname().starts_with(SYNC_INSTANCE_PREFIX);
+            match found.iter_mut().find(|p| p.pk_hex == peer.pk_hex) {
+                // Keep the sync listener's entry if we already have one.
+                Some(existing) if is_sync => *existing = peer,
+                Some(_) => {}
+                None => found.push(peer),
+            }
+        }
+    }
+    let _ = daemon.shutdown();
+    Ok(found)
 }
 
 /// Best-effort: pick a non-loopback IPv4 address of this machine. Prefer

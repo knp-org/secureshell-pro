@@ -24,15 +24,19 @@ function lanSyncSection() {
         <div class="settings-section">
             <h3>${icons.cloud()} LAN Sync</h3>
             <p class="settings-section-desc">
-                Sync connections and SSH keys with your Android app over Wi-Fi.
-                Pair once by scanning a QR; secrets stay end-to-end encrypted.
+                Sync connections and SSH keys with your other computers and the Android app
+                over Wi-Fi. Pair once — scan the QR from Android, or type the pairing code on
+                your other computer. Secrets stay end-to-end encrypted.
             </p>
             <div class="setting-row">
                 <div class="setting-label">
                     <span class="title">Paired devices</span>
                     <span class="desc" id="lan-peers-summary">Loading…</span>
                 </div>
-                <button class="btn btn-primary btn-sm" id="set-pair-device">Pair new device</button>
+                <div class="lan-peer-actions">
+                    <button class="btn btn-secondary btn-sm" id="set-join-device">Enter a code</button>
+                    <button class="btn btn-primary btn-sm"   id="set-pair-device">Pair new device</button>
+                </div>
             </div>
             <div id="lan-peers-list" class="lan-peers-list"></div>
         </div>`;
@@ -107,6 +111,7 @@ function aboutSection() {
 async function bindEvents() {
     document.getElementById('set-change-pwd')?.addEventListener('click', openChangePasswordModal);
     document.getElementById('set-pair-device')?.addEventListener('click', openPairingModal);
+    document.getElementById('set-join-device')?.addEventListener('click', openJoinModal);
     refreshPeers();
 
     const versionEl = document.getElementById('app-version');
@@ -234,54 +239,190 @@ async function openPairingModal() {
         return;
     }
 
+    const codeBlock = invite.code_pairing
+        ? `
+            <div class="pair-code-block">
+                <div class="pair-code-label">Or type this on your other computer</div>
+                <div class="pair-code">${escHtml(invite.code)}</div>
+                <div class="pair-meta">
+                    <span>Address</span><code>${escHtml(invite.ip)}</code>
+                </div>
+            </div>`
+        : `<div class="pair-code-note">
+               Code pairing is unavailable — port 43951 is already in use on this computer.
+           </div>`;
+
+    const overlay = openPairOverlay(`
+        <h3>Pair a new device</h3>
+        <p class="pair-desc">
+            Scan the QR with the Android app, or enter the code below on another computer
+            under Settings → LAN Sync → Enter a code. Then confirm the 6-digit code matches
+            on both devices.
+        </p>
+        <div class="pair-qr">${invite.qr_svg}</div>
+        ${codeBlock}
+        <div class="pair-status" id="pair-status">Waiting for the other device…</div>
+        <div class="pair-actions">
+            <button class="btn btn-secondary" id="pair-cancel">Cancel</button>
+        </div>`);
+
+    await awaitPairingOutcome(overlay);
+}
+
+async function openJoinModal() {
+    const overlay = openPairOverlay(`
+        <h3>Pair with a code</h3>
+        <p class="pair-desc">
+            On your other computer, open Settings → LAN Sync → Pair new device. Enter the
+            address and pairing code it shows.
+        </p>
+        <div class="pair-form">
+            <label for="join-host">Address</label>
+            <div class="pair-field-row">
+                <input id="join-host" type="text" class="input" placeholder="192.168.1.20"
+                       autocomplete="off" spellcheck="false">
+                <button class="btn btn-secondary btn-sm" id="join-scan">Find</button>
+            </div>
+            <div class="pair-found" id="join-found"></div>
+            <label for="join-code">Pairing code</label>
+            <input id="join-code" type="text" class="input pair-code-input"
+                   placeholder="ABCD-EFGH-JKMN" autocomplete="off" spellcheck="false"
+                   maxlength="20">
+        </div>
+        <div class="pair-status" id="pair-status"></div>
+        <div class="pair-actions">
+            <button class="btn btn-secondary" id="pair-cancel">Cancel</button>
+            <button class="btn btn-primary"   id="join-go">Connect</button>
+        </div>`);
+
+    const hostEl   = overlay.querySelector('#join-host');
+    const codeEl   = overlay.querySelector('#join-code');
+    const foundEl  = overlay.querySelector('#join-found');
+    const statusEl = overlay.querySelector('#pair-status');
+    const scanBtn  = overlay.querySelector('#join-scan');
+    const goBtn    = overlay.querySelector('#join-go');
+
+    hostEl.focus();
+
+    scanBtn.addEventListener('click', async () => {
+        scanBtn.disabled = true;
+        foundEl.textContent = 'Looking for devices on this network…';
+        try {
+            const devices = await api.syncDiscover();
+            if (devices.length === 0) {
+                foundEl.textContent = 'No other devices found — enter the address by hand.';
+            } else {
+                foundEl.innerHTML = devices.map(d => `
+                    <button class="pair-found-item" data-host="${escAttr(d.host)}">
+                        ${escHtml(d.label || d.host)} <span>${escHtml(d.host)}</span>
+                    </button>`).join('');
+                foundEl.querySelectorAll('[data-host]').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        hostEl.value = btn.dataset.host;
+                        codeEl.focus();
+                    });
+                });
+            }
+        } catch (err) {
+            foundEl.textContent = 'Could not search the network: ' + err;
+        }
+        scanBtn.disabled = false;
+    });
+
+    const connect = async () => {
+        const host = hostEl.value.trim();
+        const code = codeEl.value.trim();
+        if (!host || !code) {
+            statusEl.textContent = 'Enter both the address and the pairing code.';
+            return;
+        }
+        goBtn.disabled = true;
+        scanBtn.disabled = true;
+        statusEl.textContent = `Connecting to ${host}…`;
+        try {
+            await api.pairingJoin(host, null, code);
+        } catch (err) {
+            statusEl.textContent = String(err);
+            goBtn.disabled = false;
+            scanBtn.disabled = false;
+            return;
+        }
+        overlay.querySelector('.pair-form')?.remove();
+        goBtn.remove();
+        await awaitPairingOutcome(overlay);
+    };
+
+    goBtn.addEventListener('click', connect);
+    codeEl.addEventListener('keydown', e => { if (e.key === 'Enter') connect(); });
+    hostEl.addEventListener('keydown', e => { if (e.key === 'Enter') codeEl.focus(); });
+
+    await awaitPairingOutcome(overlay, { poll: false });
+}
+
+function openPairOverlay(innerHtml) {
     const overlay = document.createElement('div');
     overlay.className = 'pair-overlay';
-    overlay.innerHTML = `
-        <div class="pair-modal">
-            <h3>Pair a new device</h3>
-            <p class="pair-desc">Scan this QR code with the Android app, then confirm the 6-digit code matches on both devices.</p>
-            <div class="pair-qr">${invite.qr_svg}</div>
-            <div class="pair-meta">
-                <span>IP</span><code>${escHtml(invite.ip)}</code>
-                <span>Port</span><code>${invite.port}</code>
-            </div>
-            <div class="pair-status" id="pair-status">Waiting for Android device…</div>
-            <div class="pair-actions">
-                <button class="btn btn-secondary" id="pair-cancel">Cancel</button>
-            </div>
-        </div>`;
+    overlay.innerHTML = `<div class="pair-modal">${innerHtml}</div>`;
     document.body.appendChild(overlay);
+    return overlay;
+}
 
-    let stopped = false;
-    const statusEl = overlay.querySelector('#pair-status');
+/**
+ * Shared tail of both halves of pairing: poll the session until it offers a
+ * 6-digit code to compare, then let the user accept or reject it. Identical on
+ * the device showing the code and the device that typed it.
+ *
+ * With `poll: false` it only wires up Cancel and resolves — the join dialog
+ * calls it again once a connection is actually in flight.
+ */
+async function awaitPairingOutcome(overlay, { poll = true } = {}) {
+    const statusEl  = overlay.querySelector('#pair-status');
     const actionsEl = overlay.querySelector('.pair-actions');
 
+    let stopped = false;
+    let peerLabel = 'the other device';
     const finish = async (confirmed) => {
+        // The join dialog arms this twice — once for the form, once for the
+        // live session — so both Cancel buttons must add up to one cancel.
+        if (overlay.dataset.finished) return;
+        overlay.dataset.finished = '1';
         stopped = true;
         try {
-            if (confirmed === null) {
-                await api.pairingCancel();
-            } else {
-                await api.pairingConfirm(confirmed);
+            if (confirmed === null) await api.pairingCancel();
+            else                    await api.pairingConfirm(confirmed);
+            if (confirmed) showToast(`Paired with ${peerLabel}`, 'success');
+        } catch (err) {
+            // The peer is stored before the first sync runs, so a failure here
+            // means "paired, but nothing synced yet" — not "pairing failed".
+            if (confirmed) {
+                showToast(
+                    `Paired with ${peerLabel}, but the first sync did not finish `
+                    + `(${err}). Use Sync now once both devices are ready.`,
+                    'error',
+                );
             }
-        } catch {}
+        }
         overlay.remove();
         refreshPeers();
     };
 
-    overlay.querySelector('#pair-cancel').addEventListener('click', () => finish(null));
+    const cancelBtn = overlay.querySelector('#pair-cancel');
+    cancelBtn?.addEventListener('click', () => finish(null));
+    if (!poll) return;
 
-    // Poll status every 800ms
     while (!stopped) {
         await new Promise(r => setTimeout(r, 800));
         let s;
         try { s = await api.pairingStatus(); } catch { continue; }
         if (stopped) break;
         if (s.state === 'awaiting_confirmation') {
+            peerLabel = s.peer_label;
             statusEl.innerHTML = `
                 <div class="pair-sas">${escHtml(s.sas)}</div>
-                <div class="pair-sas-sub">Confirm this matches the code on Android</div>
-            `;
+                <div class="pair-sas-sub">
+                    Confirm this matches the code on ${escHtml(s.peer_label)},
+                    then accept on both devices.
+                </div>`;
             actionsEl.innerHTML = `
                 <button class="btn btn-danger" id="pair-no">Don't match</button>
                 <button class="btn btn-primary" id="pair-yes">Match — pair</button>
@@ -290,93 +431,14 @@ async function openPairingModal() {
             overlay.querySelector('#pair-no').addEventListener('click',  () => finish(false));
             break; // stop polling; wait for user
         } else if (s.state === 'failed') {
-            statusEl.textContent = 'Failed: ' + s.reason;
+            statusEl.textContent = s.reason;
             actionsEl.innerHTML = `<button class="btn btn-secondary" id="pair-close">Close</button>`;
             overlay.querySelector('#pair-close').addEventListener('click', () => finish(null));
             break;
+        } else if (s.state === 'connecting') {
+            statusEl.textContent = `Connecting to ${s.host}…`;
         }
     }
-}
-
-// ─── Change master password ────────────────────────────────
-
-function openChangePasswordModal() {
-    const overlay = document.createElement('div');
-    overlay.className = 'pair-overlay';
-    overlay.innerHTML = `
-        <div class="pair-modal cpw-modal">
-            <h3>Change Master Password</h3>
-            <p class="pair-desc">
-                Re-encrypts every saved password and private key under your new password.
-                <strong>It cannot be recovered if you lose it.</strong>
-            </p>
-            <form class="cpw-form" autocomplete="off">
-                <label class="cpw-field">
-                    <span>Current password</span>
-                    <input type="password" name="current" autocomplete="current-password" />
-                </label>
-                <label class="cpw-field">
-                    <span>New password</span>
-                    <input type="password" name="next" autocomplete="new-password" />
-                </label>
-                <label class="cpw-field">
-                    <span>Confirm new password</span>
-                    <input type="password" name="confirm" autocomplete="new-password" />
-                </label>
-                <div class="cpw-error" id="cpw-error"></div>
-                <div class="pair-actions">
-                    <button type="button" class="btn btn-secondary" id="cpw-cancel">Cancel</button>
-                    <button type="submit" class="btn btn-primary cpw-submit-btn" id="cpw-submit">
-                        <svg class="cpw-spinner" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-6.2-8.55"/></svg>
-                        <svg class="cpw-check" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-                        <span class="cpw-submit-label">Change password</span>
-                    </button>
-                </div>
-            </form>
-        </div>`;
-    document.body.appendChild(overlay);
-
-    const form     = overlay.querySelector('.cpw-form');
-    const current  = overlay.querySelector('input[name="current"]');
-    const next     = overlay.querySelector('input[name="next"]');
-    const confirm  = overlay.querySelector('input[name="confirm"]');
-    const errEl       = overlay.querySelector('#cpw-error');
-    const submitEl    = overlay.querySelector('#cpw-submit');
-    const submitLabel = submitEl.querySelector('.cpw-submit-label');
-
-    const close = () => overlay.remove();
-    overlay.querySelector('#cpw-cancel').addEventListener('click', close);
-    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(); });
-    current.focus();
-
-    form.addEventListener('submit', async (e) => {
-        e.preventDefault();
-        errEl.textContent = '';
-        if (!current.value)              { errEl.textContent = 'Enter your current password'; return; }
-        if (next.value.length < 8)       { errEl.textContent = 'New password must be at least 8 characters'; return; }
-        if (next.value !== confirm.value){ errEl.textContent = 'New passwords do not match'; return; }
-        if (next.value === current.value){ errEl.textContent = 'New password must differ from the current one'; return; }
-
-        submitEl.disabled = true;
-        submitEl.classList.add('is-loading');
-        submitLabel.textContent = 'Re-encrypting…';
-        await new Promise(r => setTimeout(r, 30));
-        try {
-            await api.vaultChangePassword(current.value, next.value);
-            submitEl.classList.remove('is-loading');
-            submitEl.classList.add('is-success');
-            submitLabel.textContent = 'Done';
-            await new Promise(r => setTimeout(r, 600));
-            close();
-            showToast('Master password changed', 'success');
-        } catch (err) {
-            submitEl.classList.remove('is-loading');
-            errEl.textContent = String(err);
-            submitEl.disabled = false;
-            submitLabel.textContent = 'Change password';
-            current.select();
-        }
-    });
 }
 
 function escHtml(s){ return (s ?? '').toString().replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
