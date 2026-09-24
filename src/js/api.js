@@ -126,20 +126,20 @@ export async function sftpListDir(sessionId, path) {
     return await invoke('sftp_list_dir', { sessionId, path });
 }
 
-export async function sftpDownload(sessionId, remotePath, localPath, transferId) {
-    return await invoke('sftp_download', { sessionId, remotePath, localPath, transferId });
+export async function sftpDownload(sessionId, remotePath, localPath, transferId, overwrite = false) {
+    return await invoke('sftp_download', { sessionId, remotePath, localPath, transferId, overwrite });
 }
 
-export async function sftpUpload(sessionId, localPath, remotePath, transferId) {
-    return await invoke('sftp_upload', { sessionId, localPath, remotePath, transferId });
+export async function sftpUpload(sessionId, localPath, remotePath, transferId, overwrite = false) {
+    return await invoke('sftp_upload', { sessionId, localPath, remotePath, transferId, overwrite });
 }
 
-export async function sftpDownloadDir(sessionId, remotePath, localPath, transferId) {
-    return await invoke('sftp_download_dir', { sessionId, remotePath, localPath, transferId });
+export async function sftpDownloadDir(sessionId, remotePath, localPath, transferId, overwrite = false) {
+    return await invoke('sftp_download_dir', { sessionId, remotePath, localPath, transferId, overwrite });
 }
 
-export async function sftpUploadDir(sessionId, localPath, remotePath, transferId) {
-    return await invoke('sftp_upload_dir', { sessionId, localPath, remotePath, transferId });
+export async function sftpUploadDir(sessionId, localPath, remotePath, transferId, overwrite = false) {
+    return await invoke('sftp_upload_dir', { sessionId, localPath, remotePath, transferId, overwrite });
 }
 
 export async function sftpRename(sessionId, oldPath, newPath) {
@@ -197,4 +197,8 @@ export async function localMkdir(path) {
 
 export async function localChmod(path, mode) {
     return await invoke('local_chmod', { path, mode });
+}
+
+export async function sftpCancelTransfer(transferId) {
+    return await invoke('sftp_cancel_transfer', { transferId });
 }

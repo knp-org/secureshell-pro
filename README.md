@@ -27,8 +27,8 @@ A private, local-first desktop SSH workspace for managing remote hosts, private 
 ## 🔐 Security Model
 
 - **Vault encryption** — All sensitive credentials (passwords, private keys, passphrases) are encrypted at rest using **AES-256-GCM** with keys derived from a master password via **Argon2id**.
-- **Zero plaintext on disk** — The vault must be unlocked before any protected value can be read or used. Locking the vault clears the in-memory master key.
-- **Master password rotation** — Change your master password at any time from **Settings → Security**. After verifying the current password, every stored secret is re-encrypted under a freshly derived key in a single atomic transaction, with an automatic database backup taken beforehand.
+- **Credential handling** — Saved credentials are encrypted in the vault. SFTP reads keys directly from memory. Terminal SSH uses an automatically cleaned-up private temporary key file for the system OpenSSH client; abrupt process termination may leave that file behind. Locking the vault clears the in-memory master key.
+- **Master password rotation** — Change your master password at any time from **Settings → Security**. After verifying the current password, every stored secret is re-encrypted under a freshly derived key in a single atomic transaction, with a consistent SQLite backup taken beforehand. Rotation stops if the backup fails.
 - **LAN sync** — Pairing uses **X25519 key exchange** and **Noise protocol** for encrypted peer-to-peer communication. Mobile peers authenticate via **HMAC-SHA256 challenge-response**. No cloud relay or hosted service is involved.
 - **Local-first** — All connection data stays on the device by default. Nothing leaves the machine unless you explicitly pair and sync.
 
@@ -138,3 +138,23 @@ Pushing a version tag (`v*`) triggers the GitHub Actions workflow which:
 ## 📄 License
 
 This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+## Validation and compatibility
+
+```bash
+npm ci
+npm run check
+npm test
+cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+cargo build --locked --manifest-path src-tauri/Cargo.toml
+# Linux: requires openssh-server, uses an isolated server on loopback
+python3 scripts/run-sftp-integration.py
+```
+
+SFTP checks `~/.ssh/known_hosts`, prompts for unknown fingerprints, and rejects changed host keys. Transfers require confirmation before replacing known destinations. Downloads commit by renaming a temporary file; upload replacement requires the server's `posix-rename@openssh.com` extension. Unsupported servers retain the original file and return an error. Cancellation preserves the file currently being replaced; files already completed in a directory transfer remain.
+
+Terminal password and key-passphrase authentication uses OpenSSH's askpass support, without `sshpass`. Windows local terminals use `COMSPEC` (normally `cmd.exe`).
+
+Sync rejects unrelated vault keys before importing credentials. When a password rotation arrives, lock and unlock the receiving vault, then sync again. Large messages use the negotiated `chunks-v1` capability with a 16 MiB message limit; older peers continue using single frames and must be updated for larger datasets. The Android companion needs matching capability support to use chunked messages.
+
+Backups are private SQLite snapshots. Backups created before migrating a legacy plaintext vault can contain plaintext credentials and should be handled accordingly.

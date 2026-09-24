@@ -98,6 +98,7 @@ pub fn run() {
             commands::sftp::sftp_stat,
             commands::sftp::sftp_read_file,
             commands::sftp::sftp_disconnect,
+            commands::sftp::sftp_cancel_transfer,
             // Local Filesystem (for SFTP dual-pane)
             commands::sftp::local_list_dir,
             commands::sftp::local_home_dir,

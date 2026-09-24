@@ -737,7 +737,7 @@ function setupGlobalEventListeners() {
     tauriEvent.listen('ssh-output', (event) => {
         const { sessionId, data } = event.payload;
         const sess = activeSessions.get(sessionId);
-        if (sess) sess.term.write(data);
+        if (sess) sess.term.write(Array.isArray(data) ? new Uint8Array(data) : data);
     });
 
     tauriEvent.listen('ssh-closed', (event) => {

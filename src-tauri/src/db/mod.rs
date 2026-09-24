@@ -38,7 +38,9 @@ impl Database {
     pub fn get_vault_meta(&self) -> Result<Option<(KdfParams, Envelope)>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT kdf, salt, m_cost, t_cost, p_cost, verifier FROM vault_meta WHERE id = 1")
+            .prepare(
+                "SELECT kdf, salt, m_cost, t_cost, p_cost, verifier FROM vault_meta WHERE id = 1",
+            )
             .map_err(|e| e.to_string())?;
 
         let row = stmt
@@ -56,20 +58,39 @@ impl Database {
         let Some((kdf, salt, m_cost, t_cost, p_cost, verifier_json)) = row else {
             return Ok(None);
         };
-        let params = KdfParams { kdf, salt, m_cost: m_cost as u32, t_cost: t_cost as u32, p_cost: p_cost as u32 };
+        let params = KdfParams {
+            kdf,
+            salt,
+            m_cost: m_cost as u32,
+            t_cost: t_cost as u32,
+            p_cost: p_cost as u32,
+        };
         let verifier: Envelope = serde_json::from_str(&verifier_json).map_err(|e| e.to_string())?;
         Ok(Some((params, verifier)))
     }
 
-    /// Copy the SQLite file alongside itself with a `.bak.<ts>` suffix.
-    /// Best-effort — failure is non-fatal.
+    /// Snapshot the live SQLite connection, including committed WAL pages.
     pub fn backup_to_sibling(&self) -> Result<PathBuf, String> {
-        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S").to_string();
-        let mut bak = self.path.clone();
-        let fname = bak.file_name().and_then(|n| n.to_str()).unwrap_or("secureshell.db").to_string();
-        bak.set_file_name(format!("{}.bak.{}", fname, ts));
-        std::fs::copy(&self.path, &bak).map_err(|e| e.to_string())?;
-        Ok(bak)
+        let conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let parent = self
+            .path
+            .parent()
+            .ok_or("database has no parent directory")?;
+        let backup = tempfile::Builder::new()
+            .prefix("secureshell.db.bak.")
+            .tempfile_in(parent)
+            .map_err(|e| e.to_string())?;
+        let mut destination = Connection::open(backup.path()).map_err(|e| e.to_string())?;
+        {
+            let snapshot = rusqlite::backup::Backup::new(&conn, &mut destination)
+                .map_err(|e| e.to_string())?;
+            snapshot
+                .run_to_completion(128, std::time::Duration::from_millis(10), None)
+                .map_err(|e| e.to_string())?;
+        }
+        drop(destination);
+        let (_, path) = backup.keep().map_err(|e| e.to_string())?;
+        Ok(path)
     }
 
     /// One-shot: encrypt every plaintext secret in `connections` and
@@ -201,9 +222,12 @@ impl Database {
                 } else {
                     stored // legacy plaintext that was never wrapped
                 };
-                let env = crypto::encrypt_field(&plaintext, new_key, &id).map_err(|e| e.to_string())?;
-                let update = format!("UPDATE {table} SET {column} = ?1, updated_at = ?2 WHERE id = ?3");
-                tx.execute(&update, rusqlite::params![env, now, id]).map_err(|e| e.to_string())?;
+                let env =
+                    crypto::encrypt_field(&plaintext, new_key, &id).map_err(|e| e.to_string())?;
+                let update =
+                    format!("UPDATE {table} SET {column} = ?1, updated_at = ?2 WHERE id = ?3");
+                tx.execute(&update, rusqlite::params![env, now, id])
+                    .map_err(|e| e.to_string())?;
             }
             Ok(())
         };
@@ -288,9 +312,11 @@ impl Database {
                 let Ok(plaintext) = crypto::decrypt_field(&stored, old_key, &id) else {
                     continue;
                 };
-                let env = crypto::encrypt_field(&plaintext, new_key, &id).map_err(|e| e.to_string())?;
+                let env =
+                    crypto::encrypt_field(&plaintext, new_key, &id).map_err(|e| e.to_string())?;
                 let update = format!("UPDATE {table} SET {column} = ?1 WHERE id = ?2");
-                tx.execute(&update, rusqlite::params![env, id]).map_err(|e| e.to_string())?;
+                tx.execute(&update, rusqlite::params![env, id])
+                    .map_err(|e| e.to_string())?;
             }
             Ok(())
         };
@@ -337,8 +363,7 @@ impl Database {
         let rows = stmt
             .query_map([], |row| {
                 let tags_str: String = row.get(9)?;
-                let tags: Vec<String> =
-                    serde_json::from_str(&tags_str).unwrap_or_default();
+                let tags: Vec<String> = serde_json::from_str(&tags_str).unwrap_or_default();
                 let synced_int: i32 = row.get(14)?;
 
                 Ok(SshConnection {
@@ -398,8 +423,11 @@ impl Database {
 
     pub fn delete_connection(&self, id: &str) -> Result<(), String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM connections WHERE id = ?1", rusqlite::params![id])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM connections WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| e.to_string())?;
         Ok(())
     }
 
@@ -542,7 +570,9 @@ impl Database {
     pub fn get_all_groups(&self) -> Result<Vec<Group>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT id, name, parent_id, icon, color, created_at FROM groups ORDER BY name ASC")
+            .prepare(
+                "SELECT id, name, parent_id, icon, color, created_at FROM groups ORDER BY name ASC",
+            )
             .map_err(|e| e.to_string())?;
 
         let rows = stmt
@@ -629,7 +659,9 @@ impl Database {
 
     /// Full vault_meta as a wire struct, including the rotation re-wrap token
     /// and previous salt/verifier. `None` if the vault isn't initialized.
-    pub fn get_vault_meta_wire(&self) -> Result<Option<crate::sync::protocol::VaultMetaWire>, String> {
+    pub fn get_vault_meta_wire(
+        &self,
+    ) -> Result<Option<crate::sync::protocol::VaultMetaWire>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let row = conn
             .query_row(
@@ -659,7 +691,8 @@ impl Database {
         let prev_salt: Option<String> = r.get(8)?;
         let prev_verifier_json: Option<String> = r.get(9)?;
         Ok((|| {
-            let verifier: Envelope = serde_json::from_str(&verifier_json).map_err(|e| e.to_string())?;
+            let verifier: Envelope =
+                serde_json::from_str(&verifier_json).map_err(|e| e.to_string())?;
             let rekey_token = rekey_token_json
                 .as_deref()
                 .map(serde_json::from_str::<Envelope>)
@@ -767,7 +800,9 @@ impl Database {
         Ok(())
     }
 
-    pub fn get_pending_rotation(&self) -> Result<Option<crate::sync::protocol::VaultMetaWire>, String> {
+    pub fn get_pending_rotation(
+        &self,
+    ) -> Result<Option<crate::sync::protocol::VaultMetaWire>, String> {
         let conn = self.conn.lock().map_err(|e| e.to_string())?;
         let row = conn
             .query_row(
@@ -794,7 +829,10 @@ impl Database {
     }
 
     /// Index a single sync-relevant table (id, updated_at, deleted_at).
-    pub fn sync_index_table(&self, table: &str) -> Result<Vec<crate::sync::protocol::IndexRow>, String> {
+    pub fn sync_index_table(
+        &self,
+        table: &str,
+    ) -> Result<Vec<crate::sync::protocol::IndexRow>, String> {
         let (sel, has_updated) = match table {
             "connections" | "snippets" => (
                 format!("SELECT id, updated_at, deleted_at FROM {}", table), true
@@ -823,7 +861,9 @@ impl Database {
             })
             .map_err(|e| e.to_string())?;
         let mut out = Vec::new();
-        for r in rows { out.push(r.map_err(|e| e.to_string())?); }
+        for r in rows {
+            out.push(r.map_err(|e| e.to_string())?);
+        }
         Ok(out)
     }
 
@@ -847,12 +887,14 @@ impl Database {
             for (i, name) in names.iter().enumerate() {
                 let v: Option<rusqlite::types::Value> = r.get(i)?;
                 let j = match v {
-                    Some(rusqlite::types::Value::Null)            => serde_json::Value::Null,
-                    Some(rusqlite::types::Value::Integer(i))      => serde_json::Value::from(i),
-                    Some(rusqlite::types::Value::Real(f))         => serde_json::Value::from(f),
-                    Some(rusqlite::types::Value::Text(s))         => serde_json::Value::String(s),
-                    Some(rusqlite::types::Value::Blob(b))         => serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(b)),
-                    None                                          => serde_json::Value::Null,
+                    Some(rusqlite::types::Value::Null) => serde_json::Value::Null,
+                    Some(rusqlite::types::Value::Integer(i)) => serde_json::Value::from(i),
+                    Some(rusqlite::types::Value::Real(f)) => serde_json::Value::from(f),
+                    Some(rusqlite::types::Value::Text(s)) => serde_json::Value::String(s),
+                    Some(rusqlite::types::Value::Blob(b)) => serde_json::Value::String(
+                        base64::engine::general_purpose::STANDARD.encode(b),
+                    ),
+                    None => serde_json::Value::Null,
                 };
                 obj.insert(name.clone(), j);
             }
@@ -865,20 +907,85 @@ impl Database {
         }
     }
 
+    pub fn sync_apply_rows(&self, rows: &[crate::sync::protocol::Row]) -> Result<(), String> {
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute_batch("PRAGMA defer_foreign_keys=ON;")
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            Self::sync_upsert_on(&tx, &row.table, &row.row)?;
+        }
+        tx.commit().map_err(|e| e.to_string())
+    }
+
     /// Upsert a row received over sync. The row is a JSON object whose
     /// keys correspond to the columns of the target table.
-    pub fn sync_upsert_row(&self, table: &str, row: &serde_json::Value) -> Result<(), String> {
-        let obj = row.as_object().ok_or_else(|| "row must be a JSON object".to_string())?;
-        let id = obj.get("id").and_then(|v| v.as_str())
+    fn sync_upsert_on(
+        conn: &Connection,
+        table: &str,
+        row: &serde_json::Value,
+    ) -> Result<(), String> {
+        let obj = row
+            .as_object()
+            .ok_or_else(|| "row must be a JSON object".to_string())?;
+        let id = obj
+            .get("id")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| "row missing id".to_string())?
             .to_string();
 
         let columns: &[&str] = match table {
-            "connections" => &["id","name","host","port","username","auth_method","password","key_id","group_id","tags","color","last_connected","created_at","updated_at","deleted_at"],
-            "ssh_keys"    => &["id","label","key_type","public_key","private_key","fingerprint","created_at","updated_at","deleted_at"],
-            "snippets"    => &["id","label","command","description","tags","connection_ids","group_id","sort_order","created_at","updated_at","deleted_at"],
-            "groups"      => &["id","name","parent_id","icon","color","created_at","deleted_at"],
-            _             => return Err(format!("unknown sync table {}", table)),
+            "connections" => &[
+                "id",
+                "name",
+                "host",
+                "port",
+                "username",
+                "auth_method",
+                "password",
+                "key_id",
+                "group_id",
+                "tags",
+                "color",
+                "last_connected",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+            ],
+            "ssh_keys" => &[
+                "id",
+                "label",
+                "key_type",
+                "public_key",
+                "private_key",
+                "fingerprint",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+            ],
+            "snippets" => &[
+                "id",
+                "label",
+                "command",
+                "description",
+                "tags",
+                "connection_ids",
+                "group_id",
+                "sort_order",
+                "created_at",
+                "updated_at",
+                "deleted_at",
+            ],
+            "groups" => &[
+                "id",
+                "name",
+                "parent_id",
+                "icon",
+                "color",
+                "created_at",
+                "deleted_at",
+            ],
+            _ => return Err(format!("unknown sync table {}", table)),
         };
 
         let placeholders: Vec<String> = (1..=columns.len()).map(|i| format!("?{}", i)).collect();
@@ -889,25 +996,147 @@ impl Database {
             placeholders.join(","),
         );
 
-        let conn = self.conn.lock().map_err(|e| e.to_string())?;
-        let values: Vec<rusqlite::types::Value> = columns.iter().map(|c| {
-            match obj.get(*c) {
-                Some(serde_json::Value::Null)       | None => rusqlite::types::Value::Null,
-                Some(serde_json::Value::Bool(b))           => rusqlite::types::Value::Integer(if *b {1} else {0}),
-                Some(serde_json::Value::Number(n))         => {
-                    if let Some(i) = n.as_i64() { rusqlite::types::Value::Integer(i) }
-                    else if let Some(f) = n.as_f64() { rusqlite::types::Value::Real(f) }
-                    else { rusqlite::types::Value::Null }
+        let values: Vec<rusqlite::types::Value> = columns
+            .iter()
+            .map(|c| match obj.get(*c) {
+                Some(serde_json::Value::Null) | None => rusqlite::types::Value::Null,
+                Some(serde_json::Value::Bool(b)) => {
+                    rusqlite::types::Value::Integer(if *b { 1 } else { 0 })
                 }
-                Some(serde_json::Value::String(s))         => rusqlite::types::Value::Text(s.clone()),
-                Some(other)                                 => rusqlite::types::Value::Text(other.to_string()),
-            }
-        }).collect();
+                Some(serde_json::Value::Number(n)) => {
+                    if let Some(i) = n.as_i64() {
+                        rusqlite::types::Value::Integer(i)
+                    } else if let Some(f) = n.as_f64() {
+                        rusqlite::types::Value::Real(f)
+                    } else {
+                        rusqlite::types::Value::Null
+                    }
+                }
+                Some(serde_json::Value::String(s)) => rusqlite::types::Value::Text(s.clone()),
+                Some(other) => rusqlite::types::Value::Text(other.to_string()),
+            })
+            .collect();
 
-        let refs: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+        let refs: Vec<&dyn rusqlite::ToSql> =
+            values.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
         conn.execute(&sql, rusqlite::params_from_iter(refs.iter()))
             .map_err(|e| e.to_string())?;
         let _ = id;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use crate::sync::protocol::Row;
+    use serde_json::json;
+
+    fn row(table: &str, value: serde_json::Value) -> Row {
+        Row {
+            table: table.into(),
+            row: value,
+        }
+    }
+    fn connection(group: &str) -> Row {
+        row(
+            "connections",
+            json!({"id":"host", "name":"Host", "host":"localhost", "username":"test", "auth_method":"key", "port":22, "tags":"[]", "group_id":group, "created_at":"2026-01-01", "updated_at":"2026-01-01"}),
+        )
+    }
+
+    #[test]
+    fn backup_includes_committed_wal_pages() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("live.db")).unwrap();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")
+            .unwrap();
+        db.set_setting("committed", "value").unwrap();
+        let backup = Connection::open(db.backup_to_sibling().unwrap()).unwrap();
+        let value: String = backup
+            .query_row(
+                "SELECT value FROM settings WHERE key='committed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(value, "value");
+    }
+
+    #[test]
+    fn sync_accepts_child_before_parent_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("live.db")).unwrap();
+        let rows = vec![
+            connection("child"),
+            row(
+                "groups",
+                json!({"id":"child","name":"Child","parent_id":"parent","created_at":"2026-01-01"}),
+            ),
+            row(
+                "groups",
+                json!({"id":"parent","name":"Parent","created_at":"2026-01-01"}),
+            ),
+        ];
+        db.sync_apply_rows(&rows).unwrap();
+        assert_eq!(db.get_all_connections().unwrap().len(), 1);
+        assert_eq!(db.get_all_groups().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn invalid_sync_rolls_back_entire_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("live.db")).unwrap();
+        let rows = vec![
+            row(
+                "groups",
+                json!({"id":"valid","name":"Valid","created_at":"2026-01-01"}),
+            ),
+            connection("missing"),
+        ];
+        assert!(db.sync_apply_rows(&rows).is_err());
+        assert!(db.get_all_groups().unwrap().is_empty());
+        assert!(db.get_all_connections().unwrap().is_empty());
+    }
+
+    #[test]
+    fn password_rotation_reencrypts_all_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("live.db")).unwrap();
+        let mut host = connection("");
+        host.row["group_id"] = serde_json::Value::Null;
+        host.row["password"] = json!("secret");
+        db.sync_apply_rows(&[host]).unwrap();
+        let old_key = MasterKey([1; 32]);
+        let new_key = MasterKey([2; 32]);
+        let old_kdf = KdfParams::new_random();
+        let new_kdf = KdfParams::new_random();
+        let old_verifier = crypto::make_verifier(&old_key).unwrap();
+        let new_verifier = crypto::make_verifier(&new_key).unwrap();
+        db.run_initial_encryption(&old_key, &old_kdf, &old_verifier)
+            .unwrap();
+        db.run_rekey(
+            &old_key,
+            &new_key,
+            &new_kdf,
+            &new_verifier,
+            &old_kdf,
+            &old_verifier,
+        )
+        .unwrap();
+        let encrypted = db
+            .get_all_connections()
+            .unwrap()
+            .remove(0)
+            .password
+            .unwrap();
+        assert_eq!(
+            crypto::decrypt_field(&encrypted, &new_key, "host").unwrap(),
+            "secret"
+        );
+        assert!(crypto::decrypt_field(&encrypted, &old_key, "host").is_err());
     }
 }

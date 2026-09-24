@@ -1,3 +1,5 @@
+import { escHtml, escAttr } from '../utils/helpers.js';
+
 export function showConfirm({ title, message, confirmText = 'Delete', cancelText = 'Cancel', danger = false }) {
     return new Promise((resolve) => {
         const overlay = document.createElement('div');
@@ -5,14 +7,14 @@ export function showConfirm({ title, message, confirmText = 'Delete', cancelText
         overlay.innerHTML = `
             <div class="modal-dialog">
                 <div class="modal-dialog-header">
-                    <h3>${title}</h3>
+                    <h3>${escHtml(title)}</h3>
                 </div>
                 <div class="modal-dialog-body">
-                    <p>${message}</p>
+                    <p>${escHtml(message)}</p>
                 </div>
                 <div class="modal-dialog-footer">
-                    <button type="button" class="btn btn-secondary" data-action="cancel">${cancelText}</button>
-                    <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-action="confirm">${confirmText}</button>
+                    <button type="button" class="btn btn-secondary" data-action="cancel">${escHtml(cancelText)}</button>
+                    <button type="button" class="btn ${danger ? 'btn-danger' : 'btn-primary'}" data-action="confirm">${escHtml(confirmText)}</button>
                 </div>
             </div>
         `;
@@ -31,7 +33,6 @@ export function showConfirm({ title, message, confirmText = 'Delete', cancelText
         });
         overlay.addEventListener('keydown', (e) => {
             if (e.key === 'Escape') close(false);
-            if (e.key === 'Enter') close(true);
         });
         overlay.querySelector('[data-action="cancel"]').focus();
     });
@@ -44,15 +45,15 @@ export function showPrompt({ title, message = '', placeholder = '', defaultValue
         overlay.innerHTML = `
             <div class="modal-dialog">
                 <div class="modal-dialog-header">
-                    <h3>${title}</h3>
+                    <h3>${escHtml(title)}</h3>
                 </div>
                 <div class="modal-dialog-body">
-                    ${message ? `<p>${message}</p>` : ''}
-                    <input type="text" class="modal-dialog-input" placeholder="${placeholder}" value="${defaultValue.replace(/"/g, '&quot;')}" />
+                    ${message ? `<p>${escHtml(message)}</p>` : ''}
+                    <input type="text" class="modal-dialog-input" placeholder="${escAttr(placeholder)}" value="${escAttr(defaultValue)}" />
                 </div>
                 <div class="modal-dialog-footer">
-                    <button type="button" class="btn btn-secondary" data-action="cancel">${cancelText}</button>
-                    <button type="button" class="btn btn-primary" data-action="confirm">${confirmText}</button>
+                    <button type="button" class="btn btn-secondary" data-action="cancel">${escHtml(cancelText)}</button>
+                    <button type="button" class="btn btn-primary" data-action="confirm">${escHtml(confirmText)}</button>
                 </div>
             </div>
         `;

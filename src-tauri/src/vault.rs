@@ -64,7 +64,9 @@ pub fn maybe_decrypt_field(
         return Ok(Some(v)); // legacy plaintext
     }
     vault.with_key(|key| {
-        decrypt_field(&v, key, record_id).map_err(|e| e.to_string()).map(Some)
+        decrypt_field(&v, key, record_id)
+            .map_err(|e| e.to_string())
+            .map(Some)
     })
 }
 
@@ -85,7 +87,9 @@ pub fn encrypt_field_required(
         return Ok(Some(v));
     }
     vault.with_key(|key| {
-        encrypt_field(&v, key, record_id).map_err(|e| e.to_string()).map(Some)
+        encrypt_field(&v, key, record_id)
+            .map_err(|e| e.to_string())
+            .map(Some)
     })
 }
 
@@ -98,7 +102,10 @@ pub struct VaultStatus {
 }
 
 #[tauri::command]
-pub fn vault_status(db: State<'_, Database>, vault: State<'_, Vault>) -> Result<VaultStatus, String> {
+pub fn vault_status(
+    db: State<'_, Database>,
+    vault: State<'_, Vault>,
+) -> Result<VaultStatus, String> {
     Ok(VaultStatus {
         initialized: db.get_vault_meta()?.is_some(),
         unlocked: vault.is_unlocked(),
@@ -119,7 +126,8 @@ pub fn vault_init(
     }
 
     // 1. Back up the DB file before we mutate any rows.
-    db.backup_to_sibling().ok(); // best-effort
+    db.backup_to_sibling()
+        .map_err(|e| format!("Backup failed; vault was not changed: {e}"))?;
 
     // 2. Derive key, build verifier.
     let kdf = KdfParams::new_random();
@@ -166,7 +174,10 @@ pub fn vault_lock(vault: State<'_, Vault>) -> Result<(), String> {
 /// Returns `true` if a rotation was adopted. No-op when locked or nothing
 /// pending. The frontend can call this after a sync completes.
 #[tauri::command]
-pub fn vault_apply_pending(db: State<'_, Database>, vault: State<'_, Vault>) -> Result<bool, String> {
+pub fn vault_apply_pending(
+    db: State<'_, Database>,
+    vault: State<'_, Vault>,
+) -> Result<bool, String> {
     if !vault.is_unlocked() {
         return Ok(false);
     }
@@ -185,15 +196,24 @@ pub fn vault_apply_pending(db: State<'_, Database>, vault: State<'_, Vault>) -> 
 /// re-encrypt our local-only secrets, and promote the meta. Returns the new key
 /// so the caller can keep the session unlocked, or `None` if there is nothing
 /// pending or it can't be adopted with this key (left for the new-password path).
-pub fn apply_pending_rotation(db: &Database, old_key: &MasterKey) -> Result<Option<MasterKey>, String> {
-    let Some(pending) = db.get_pending_rotation()? else { return Ok(None) };
-    let Some(token) = pending.rekey_token.as_ref() else { return Ok(None) };
+pub fn apply_pending_rotation(
+    db: &Database,
+    old_key: &MasterKey,
+) -> Result<Option<MasterKey>, String> {
+    let Some(pending) = db.get_pending_rotation()? else {
+        return Ok(None);
+    };
+    let Some(token) = pending.rekey_token.as_ref() else {
+        return Ok(None);
+    };
 
     // Recover the new key with our current key. A failure means our key isn't
     // the one this token was wrapped under (we're more than one rotation
     // behind, or it's the wrong key) — leave it pending for the new-password
     // fallback rather than corrupting anything.
-    let Ok(new_key) = crypto::unwrap_master_key(token, old_key) else { return Ok(None) };
+    let Ok(new_key) = crypto::unwrap_master_key(token, old_key) else {
+        return Ok(None);
+    };
     crypto::verify(&new_key, &pending.verifier)
         .map_err(|_| "rotation token did not match its verifier".to_string())?;
 
@@ -235,11 +255,11 @@ pub fn vault_change_password(
     // 3. Back up the DB, then atomically re-key every secret + the meta. The
     //    old salt/verifier and a new-key-wrapped-under-old-key token are stored
     //    so paired peers can adopt this rotation without the new password.
-    db.backup_to_sibling().ok(); // best-effort
+    db.backup_to_sibling()
+        .map_err(|e| format!("Backup failed; vault was not changed: {e}"))?;
     db.run_rekey(&old_key, &new_key, &new_kdf, &new_verifier, &kdf, &verifier)?;
 
     // 4. Keep the session unlocked under the new key.
     vault.set(new_key)?;
     Ok(())
 }
-

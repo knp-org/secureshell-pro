@@ -9,7 +9,11 @@ export function showToast(message, type = 'info', duration = 3000) {
     toast.className = `toast ${type}`;
 
     const icon = type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ';
-    toast.innerHTML = `<span>${icon}</span><span>${message}</span>`;
+    const iconEl = document.createElement('span');
+    iconEl.textContent = icon;
+    const messageEl = document.createElement('span');
+    messageEl.textContent = String(message);
+    toast.append(iconEl, messageEl);
 
     container.appendChild(toast);
 

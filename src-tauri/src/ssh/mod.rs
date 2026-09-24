@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::path::PathBuf;
+
 use tauri::{AppHandle, Emitter};
 
 /// Holds one active SSH session
@@ -19,37 +19,40 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     alive: Arc<Mutex<bool>>,
-    key_path: Option<PathBuf>,
+    _key_file: Option<tempfile::NamedTempFile>,
+    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        if let Some(path) = &self.key_path {
-            let _ = std::fs::remove_file(path);
+        let _ = self.killer.kill();
+        if let Ok(mut alive) = self.alive.lock() {
+            *alive = false;
         }
     }
 }
 
 /// Manages all active SSH sessions
 pub struct SshManager {
-    sessions: Mutex<HashMap<String, Session>>,
+    sessions: Arc<Mutex<HashMap<String, Session>>>,
 }
 
 impl SshManager {
     pub fn new() -> Self {
         Self {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     fn default_shell() -> String {
-        std::env::var("SHELL").unwrap_or_else(|_| {
-            if std::path::Path::new("/bin/bash").exists() {
-                "/bin/bash".into()
-            } else {
-                "sh".into()
-            }
-        })
+        #[cfg(windows)]
+        {
+            std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".into())
+        }
+        #[cfg(not(windows))]
+        {
+            std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+        }
     }
 
     /// Spawn a process in a PTY and stream I/O via Tauri events.
@@ -58,7 +61,7 @@ impl SshManager {
         session_id: &str,
         cmd: CommandBuilder,
         app: &AppHandle,
-        key_path: Option<PathBuf>,
+        key_file: Option<tempfile::NamedTempFile>,
     ) -> Result<(), String> {
         let pty_system = native_pty_system();
 
@@ -71,11 +74,6 @@ impl SshManager {
             })
             .map_err(|e| format!("Failed to open PTY: {}", e))?;
 
-        let _child = pty_pair
-            .slave
-            .spawn_command(cmd)
-            .map_err(|e| format!("Failed to spawn process: {}", e))?;
-
         let reader = pty_pair
             .master
             .try_clone_reader()
@@ -86,24 +84,33 @@ impl SshManager {
             .take_writer()
             .map_err(|e| format!("Failed to get PTY writer: {}", e))?;
 
-        let alive = Arc::new(Mutex::new(true));
+        let mut child = pty_pair
+            .slave
+            .spawn_command(cmd)
+            .map_err(|e| format!("Failed to spawn process: {}", e))?;
 
-        {
-            let mut sessions = self.sessions.lock().map_err(|e| e.to_string())?;
-            sessions.insert(
-                session_id.to_string(),
-                Session {
-                    master: pty_pair.master,
-                    writer,
-                    alive: alive.clone(),
-                    key_path,
-                },
-            );
-        }
+        let alive = Arc::new(Mutex::new(true));
+        let killer = child.clone_killer();
+        thread::spawn(move || {
+            let _ = child.wait();
+        });
+
+        let session = Session {
+            master: pty_pair.master,
+            writer,
+            alive: alive.clone(),
+            _key_file: key_file,
+            killer,
+        };
+        self.sessions
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(session_id.to_string(), session);
 
         let sid = session_id.to_string();
         let app_handle = app.clone();
 
+        let sessions = self.sessions.clone();
         thread::spawn(move || {
             let mut buf = [0u8; 4096];
             let mut reader = reader;
@@ -116,11 +123,11 @@ impl SshManager {
                 }
                 match reader.read(&mut buf) {
                     Ok(0) => {
-                        let _ = app_handle.emit("ssh-closed", &sid);
                         break;
                     }
                     Ok(n) => {
-                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                        // xterm's streaming UTF-8 decoder handles codepoints split across reads.
+                        let data = &buf[..n];
                         let payload = serde_json::json!({
                             "sessionId": sid,
                             "data": data,
@@ -128,9 +135,17 @@ impl SshManager {
                         let _ = app_handle.emit("ssh-output", payload);
                     }
                     Err(_) => {
-                        let _ = app_handle.emit("ssh-closed", &sid);
                         break;
                     }
+                }
+            }
+            if let Ok(mut sessions) = sessions.lock() {
+                if sessions
+                    .get(&sid)
+                    .is_some_and(|session| Arc::ptr_eq(&session.alive, &alive))
+                {
+                    sessions.remove(&sid);
+                    let _ = app_handle.emit("ssh-closed", &sid);
                 }
             }
         });
@@ -158,54 +173,54 @@ impl SshManager {
         port: u16,
         username: &str,
         password: Option<&str>,
-        key_path: Option<PathBuf>,
+        key_file: Option<tempfile::NamedTempFile>,
         app: &AppHandle,
     ) -> Result<(), String> {
         // Build the ssh command
         let mut cmd = CommandBuilder::new("ssh");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
-        cmd.arg(format!("{}@{}", username, host));
+        if host.is_empty()
+            || host.starts_with('-')
+            || username.starts_with('-')
+            || username.is_empty()
+        {
+            return Err("Invalid SSH host or username".into());
+        }
+        cmd.arg("-l");
+        cmd.arg(username);
         cmd.arg("-p");
         cmd.arg(port.to_string());
         cmd.arg("-o");
         cmd.arg("StrictHostKeyChecking=accept-new");
-        
-        if let Some(path) = &key_path {
+
+        if let Some(file) = &key_file {
             cmd.arg("-i");
-            cmd.arg(path);
+            cmd.arg(file.path());
             cmd.arg("-o");
             cmd.arg("IdentitiesOnly=yes"); // Force using only this key
         }
 
-        // If password provided and sshpass available, use it
-        if let Some(pwd) = password {
-            if !pwd.is_empty() {
-                let mut sshpass_cmd = CommandBuilder::new("sshpass");
-                sshpass_cmd.env("TERM", "xterm-256color");
-                sshpass_cmd.env("COLORTERM", "truecolor");
-                // if it's a key passphrase, sshpass -P passphrase doesn't work easily with standard sshpass.
-                // standard sshpass only supports password auth, but sshpass -P "passphrase" is a patched version.
-                // Assuming standard sshpass usage for password authentication:
-                sshpass_cmd.arg("-p");
-                sshpass_cmd.arg(pwd);
-                sshpass_cmd.arg("ssh");
-                sshpass_cmd.arg(format!("{}@{}", username, host));
-                sshpass_cmd.arg("-p");
-                sshpass_cmd.arg(port.to_string());
-                sshpass_cmd.arg("-o");
-                sshpass_cmd.arg("StrictHostKeyChecking=accept-new");
-                if let Some(path) = &key_path {
-                    sshpass_cmd.arg("-i");
-                    sshpass_cmd.arg(path);
-                    sshpass_cmd.arg("-o");
-                    sshpass_cmd.arg("IdentitiesOnly=yes");
-                }
-                cmd = sshpass_cmd;
+        // OpenSSH invokes our executable as an askpass helper. Secrets are never
+        // command-line arguments; both password and key-passphrase prompts work.
+        if let Some(secret) = password.filter(|s| !s.is_empty()) {
+            cmd.env(
+                "SSH_ASKPASS",
+                std::env::current_exe().map_err(|e| e.to_string())?,
+            );
+            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+            cmd.env("SSP_ASKPASS_SECRET", secret);
+            if std::env::var_os("DISPLAY").is_none() {
+                cmd.env("DISPLAY", ":0");
             }
         }
-
-        self.spawn_pty_session(session_id, cmd, app, key_path)
+        cmd.arg("-o");
+        cmd.arg("ConnectTimeout=15");
+        cmd.arg("-o");
+        cmd.arg("NumberOfPasswordPrompts=1");
+        cmd.arg("--");
+        cmd.arg(host);
+        self.spawn_pty_session(session_id, cmd, app, key_file)
     }
 
     /// Write data (keystrokes) to a session.
@@ -221,8 +236,14 @@ impl SshManager {
     pub fn resize(&self, session_id: &str, rows: u16, cols: u16) -> Result<(), String> {
         let sessions = self.sessions.lock().map_err(|e| e.to_string())?;
         let session = sessions.get(session_id).ok_or("Session not found")?;
-        session.master
-            .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        session
+            .master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .map_err(|e| e.to_string())?;
         Ok(())
     }
@@ -236,5 +257,13 @@ impl SshManager {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for SshManager {
+    fn drop(&mut self) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.clear();
+        }
     }
 }

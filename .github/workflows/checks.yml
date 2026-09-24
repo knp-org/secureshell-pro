@@ -1,0 +1,41 @@
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+permissions:
+  contents: read
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev libssl-dev libdbus-1-dev openssh-server
+          sudo mkdir -p /run/sshd
+      - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
+      - run: cargo check --locked --manifest-path src-tauri/Cargo.toml --all-targets
+      - name: SFTP integration
+        if: runner.os == 'Linux'
+        run: python3 scripts/run-sftp-integration.py

@@ -12,11 +12,24 @@ use crate::sync::transport::Session;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Message {
-    Hello { device: String, vault_meta_hash: String },
-    VaultMeta { vault_meta: VaultMetaWire },
-    Index { rows: Vec<IndexRow> },
-    Want  { ids: Vec<RowId> },
-    Rows  { rows: Vec<Row> },
+    Hello {
+        device: String,
+        vault_meta_hash: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        capabilities: Vec<String>,
+    },
+    VaultMeta {
+        vault_meta: VaultMetaWire,
+    },
+    Index {
+        rows: Vec<IndexRow>,
+    },
+    Want {
+        ids: Vec<RowId>,
+    },
+    Rows {
+        rows: Vec<Row>,
+    },
     Bye,
 }
 
@@ -86,77 +99,101 @@ pub struct SyncStats {
     pub pushed: usize,
 }
 
-/// Run a full bidirectional sync over an established Noise transport.
-/// The caller is responsible for handshake + setting up `session`.
 pub async fn run_sync(
     stream: &mut TcpStream,
     session: &mut Session,
     db: &Database,
     device_label: &str,
 ) -> Result<SyncStats, String> {
-    // 1. Hello exchange
     let our_meta = load_vault_meta(db)?;
     let our_hash = our_meta.as_ref().map(vault_meta_hash).unwrap_or_default();
-    session.send(stream, &Message::Hello {
-        device: device_label.into(),
-        vault_meta_hash: our_hash.clone(),
-    }).await?;
-
-    let peer_hello: Message = session.recv(stream).await?;
-    let peer_meta_hash = match peer_hello {
-        Message::Hello { vault_meta_hash, .. } => vault_meta_hash,
+    let hello: Message = session
+        .exchange(
+            stream,
+            &Message::Hello {
+                device: device_label.into(),
+                vault_meta_hash: our_hash.clone(),
+                capabilities: vec!["chunks-v1".into()],
+            },
+        )
+        .await?;
+    let peer_hash = match hello {
+        Message::Hello {
+            vault_meta_hash,
+            capabilities,
+            ..
+        } => {
+            session.chunked = capabilities.iter().any(|c| c == "chunks-v1");
+            vault_meta_hash
+        }
         _ => return Err("expected Hello".into()),
     };
-
-    // 2. Vault meta exchange if hashes diverge
-    if our_hash != peer_meta_hash {
-        if let Some(meta) = our_meta.as_ref() {
-            session.send(stream, &Message::VaultMeta { vault_meta: meta.clone() }).await?;
-        }
-        // Receive the peer's VaultMeta (only if they have one). Newer wins
-        // by updated_at — if ours is older or missing, persist theirs.
-        let msg: Message = session.recv(stream).await?;
-        if let Message::VaultMeta { vault_meta } = msg {
+    if our_hash != peer_hash {
+        let incoming = match (our_meta.as_ref(), peer_hash.is_empty()) {
+            (Some(meta), false) => Some(
+                session
+                    .exchange::<_, Message>(
+                        stream,
+                        &Message::VaultMeta {
+                            vault_meta: meta.clone(),
+                        },
+                    )
+                    .await?,
+            ),
+            (Some(meta), true) => {
+                session
+                    .send(
+                        stream,
+                        &Message::VaultMeta {
+                            vault_meta: meta.clone(),
+                        },
+                    )
+                    .await?;
+                None
+            }
+            (None, false) => Some(session.recv::<Message>(stream).await?),
+            (None, true) => None,
+        };
+        if let Some(message) = incoming {
+            let Message::VaultMeta { vault_meta } = message else {
+                return Err("expected VaultMeta".into());
+            };
+            if vault_meta_hash(&vault_meta) != peer_hash {
+                return Err("Vault metadata hash mismatch".into());
+            }
             apply_vault_meta_if_newer(db, &vault_meta, &our_meta)?;
         }
     }
-
-    // 3. Index exchange
     let our_index = build_index(db)?;
-    session.send(stream, &Message::Index { rows: our_index.clone() }).await?;
-    let peer_index = match session.recv::<Message>(stream).await? {
+    let peer_index = match session
+        .exchange(
+            stream,
+            &Message::Index {
+                rows: our_index.clone(),
+            },
+        )
+        .await?
+    {
         Message::Index { rows } => rows,
         _ => return Err("expected Index".into()),
     };
-
-    // 4. Diff: figure out which rows we want from the peer.
-    let want_from_peer = diff_want(&our_index, &peer_index);
-    let want_from_us   = diff_want(&peer_index, &our_index);
-
-    session.send(stream, &Message::Want { ids: want_from_peer.clone() }).await?;
-    let peer_want = match session.recv::<Message>(stream).await? {
+    let wanted = diff_want(&our_index, &peer_index);
+    let peer_want = match session
+        .exchange(stream, &Message::Want { ids: wanted })
+        .await?
+    {
         Message::Want { ids } => ids,
         _ => return Err("expected Want".into()),
     };
-
-    // 5. Send rows the peer asked for
-    let rows_to_send = collect_rows(db, &peer_want)?;
-    session.send(stream, &Message::Rows { rows: rows_to_send }).await?;
-    let pushed = peer_want.len();
-    let _ = want_from_us; // (only informational on this side)
-
-    // 6. Receive rows we asked for
-    let pulled_rows = match session.recv::<Message>(stream).await? {
+    let rows = collect_rows(db, &peer_want)?;
+    let pushed = rows.len();
+    let pulled_rows = match session.exchange(stream, &Message::Rows { rows }).await? {
         Message::Rows { rows } => rows,
         _ => return Err("expected Rows".into()),
     };
     let pulled = pulled_rows.len();
     apply_rows(db, &pulled_rows)?;
-
-    // 7. Bye
-    session.send(stream, &Message::Bye).await?;
-    let _: Option<Message> = session.recv(stream).await.ok();
-
+    let _: Message = session.exchange(stream, &Message::Bye).await?;
     Ok(SyncStats { pulled, pushed })
 }
 
@@ -166,64 +203,95 @@ pub async fn run_sync_mobile(
     db: &Database,
     device_label: &str,
 ) -> Result<SyncStats, String> {
-    // 1. Hello exchange
     let our_meta = load_vault_meta(db)?;
     let our_hash = our_meta.as_ref().map(vault_meta_hash).unwrap_or_default();
-    session.send(stream, &Message::Hello {
-        device: device_label.into(),
-        vault_meta_hash: our_hash.clone(),
-    }).await?;
-
-    let peer_hello: Message = session.recv(stream).await?;
-    let peer_meta_hash = match peer_hello {
-        Message::Hello { vault_meta_hash, .. } => vault_meta_hash,
+    let hello: Message = session
+        .exchange(
+            stream,
+            &Message::Hello {
+                device: device_label.into(),
+                vault_meta_hash: our_hash.clone(),
+                capabilities: vec!["chunks-v1".into()],
+            },
+        )
+        .await?;
+    let peer_hash = match hello {
+        Message::Hello {
+            vault_meta_hash,
+            capabilities,
+            ..
+        } => {
+            session.chunked = capabilities.iter().any(|c| c == "chunks-v1");
+            vault_meta_hash
+        }
         _ => return Err("expected Hello".into()),
     };
-
-    // 2. Vault meta exchange if hashes diverge
-    if our_hash != peer_meta_hash {
-        if let Some(meta) = our_meta.as_ref() {
-            session.send(stream, &Message::VaultMeta { vault_meta: meta.clone() }).await?;
-        }
-        let msg: Message = session.recv(stream).await?;
-        if let Message::VaultMeta { vault_meta } = msg {
+    if our_hash != peer_hash {
+        let incoming = match (our_meta.as_ref(), peer_hash.is_empty()) {
+            (Some(meta), false) => Some(
+                session
+                    .exchange::<_, Message>(
+                        stream,
+                        &Message::VaultMeta {
+                            vault_meta: meta.clone(),
+                        },
+                    )
+                    .await?,
+            ),
+            (Some(meta), true) => {
+                session
+                    .send(
+                        stream,
+                        &Message::VaultMeta {
+                            vault_meta: meta.clone(),
+                        },
+                    )
+                    .await?;
+                None
+            }
+            (None, false) => Some(session.recv::<Message>(stream).await?),
+            (None, true) => None,
+        };
+        if let Some(message) = incoming {
+            let Message::VaultMeta { vault_meta } = message else {
+                return Err("expected VaultMeta".into());
+            };
+            if vault_meta_hash(&vault_meta) != peer_hash {
+                return Err("Vault metadata hash mismatch".into());
+            }
             apply_vault_meta_if_newer(db, &vault_meta, &our_meta)?;
         }
     }
-
-    // 3. Index exchange
     let our_index = build_index(db)?;
-    session.send(stream, &Message::Index { rows: our_index.clone() }).await?;
-    let peer_index = match session.recv::<Message>(stream).await? {
+    let peer_index = match session
+        .exchange(
+            stream,
+            &Message::Index {
+                rows: our_index.clone(),
+            },
+        )
+        .await?
+    {
         Message::Index { rows } => rows,
         _ => return Err("expected Index".into()),
     };
-
-    // 4. Diff
-    let want_from_peer = diff_want(&our_index, &peer_index);
-    session.send(stream, &Message::Want { ids: want_from_peer.clone() }).await?;
-    let peer_want = match session.recv::<Message>(stream).await? {
+    let wanted = diff_want(&our_index, &peer_index);
+    let peer_want = match session
+        .exchange(stream, &Message::Want { ids: wanted })
+        .await?
+    {
         Message::Want { ids } => ids,
         _ => return Err("expected Want".into()),
     };
-
-    // 5. Send rows
-    let rows_to_send = collect_rows(db, &peer_want)?;
-    session.send(stream, &Message::Rows { rows: rows_to_send }).await?;
-    let pushed = peer_want.len();
-
-    // 6. Receive rows
-    let pulled_rows = match session.recv::<Message>(stream).await? {
+    let rows = collect_rows(db, &peer_want)?;
+    let pushed = rows.len();
+    let pulled_rows = match session.exchange(stream, &Message::Rows { rows }).await? {
         Message::Rows { rows } => rows,
         _ => return Err("expected Rows".into()),
     };
     let pulled = pulled_rows.len();
     apply_rows(db, &pulled_rows)?;
-
-    // 7. Bye
-    session.send(stream, &Message::Bye).await?;
-    let _: Option<Message> = session.recv(stream).await.ok();
-
+    let _: Message = session.exchange(stream, &Message::Bye).await?;
     Ok(SyncStats { pulled, pushed })
 }
 
@@ -249,11 +317,17 @@ fn diff_want(local: &[IndexRow], remote: &[IndexRow]) -> Vec<RowId> {
     for r in remote {
         let key = (r.table.clone(), r.id.clone());
         match local_map.get(&key) {
-            None => want.push(RowId { table: r.table.clone(), id: r.id.clone() }),
+            None => want.push(RowId {
+                table: r.table.clone(),
+                id: r.id.clone(),
+            }),
             Some(ours) => {
                 // Want the peer's row if theirs is newer.
                 if r.updated_at > ours.updated_at {
-                    want.push(RowId { table: r.table.clone(), id: r.id.clone() });
+                    want.push(RowId {
+                        table: r.table.clone(),
+                        id: r.id.clone(),
+                    });
                 }
             }
         }
@@ -265,17 +339,17 @@ fn collect_rows(db: &Database, ids: &[RowId]) -> Result<Vec<Row>, String> {
     let mut rows = Vec::with_capacity(ids.len());
     for id in ids {
         if let Some(value) = db.sync_get_row(&id.table, &id.id)? {
-            rows.push(Row { table: id.table.clone(), row: value });
+            rows.push(Row {
+                table: id.table.clone(),
+                row: value,
+            });
         }
     }
     Ok(rows)
 }
 
 fn apply_rows(db: &Database, rows: &[Row]) -> Result<(), String> {
-    for r in rows {
-        db.sync_upsert_row(&r.table, &r.row)?;
-    }
-    Ok(())
+    db.sync_apply_rows(rows)
 }
 
 fn apply_vault_meta_if_newer(
@@ -283,32 +357,195 @@ fn apply_vault_meta_if_newer(
     incoming: &VaultMetaWire,
     ours: &Option<VaultMetaWire>,
 ) -> Result<(), String> {
-    match ours {
-        // Fresh device with no vault yet: adopt directly — there are no
-        // local secrets under an old key, so nothing can be bricked.
-        None => db.set_vault_meta_wire(incoming),
-        // We already have a vault. Only act if the incoming meta is strictly
-        // newer (a rotation). We do NOT swap it here — doing so without
-        // re-encrypting our local-only secrets to the new key would brick
-        // them. Instead we park it as a pending rotation; a key-holding step
-        // (vault_unlock / post-sync, see vault::apply_pending_rotation) unwraps
-        // the rekey_token with the old key, re-keys every local secret, then
-        // promotes it. Data-only here, so the sync path needs no master key.
-        Some(o) => {
-            let newer = match (o.updated_at.as_deref(), incoming.updated_at.as_deref()) {
-                (Some(a), Some(b)) => b > a,
-                (None, Some(_))    => true,
-                _                  => false,
-            };
-            // Identical meta (same hash differing only by our diff trigger) or
-            // older — ignore. Also ignore a "newer" meta we can't ever adopt
-            // (no token and not the same vault), to avoid a permanently dirty
-            // pending row; the universal new-password fallback is handled at
-            // the vault layer when prev_verifier is present.
-            if newer && (incoming.rekey_token.is_some() || incoming.prev_verifier.is_some()) {
-                db.set_pending_rotation(incoming)?;
-            }
-            Ok(())
+    let Some(ours) = ours else {
+        // Legacy plaintext must be migrated locally before adopting another vault.
+        if db
+            .get_all_connections()?
+            .iter()
+            .any(|c| c.password.is_some())
+            || db.get_all_keys()?.iter().any(|k| k.private_key.is_some())
+        {
+            return Err("Initialize the local vault before syncing existing credentials".into());
         }
+        return db.set_vault_meta_wire(incoming);
+    };
+    if same_vault_key(ours, incoming) {
+        return Ok(());
+    }
+    if incoming.prev_salt.as_deref() == Some(ours.salt.as_str())
+        && incoming
+            .prev_verifier
+            .as_ref()
+            .map(|v| serde_json::to_string(v).ok())
+            == Some(serde_json::to_string(&ours.verifier).ok())
+        && incoming.rekey_token.is_some()
+    {
+        db.set_pending_rotation(incoming)?;
+        return Err(
+            "Vault password rotation received. Lock and unlock the vault, then sync again.".into(),
+        );
+    }
+    if ours.prev_salt.as_deref() == Some(incoming.salt.as_str())
+        && ours
+            .prev_verifier
+            .as_ref()
+            .map(|v| serde_json::to_string(v).ok())
+            == Some(serde_json::to_string(&incoming.verifier).ok())
+        && ours.rekey_token.is_some()
+    {
+        return Err("The peer must lock and unlock its vault to adopt the password rotation, then sync again.".into());
+    }
+    Err("These devices use different vault keys. Sync stopped without importing credentials. Pair a fresh vault or restore a shared vault backup first.".into())
+}
+
+fn same_vault_key(a: &VaultMetaWire, b: &VaultMetaWire) -> bool {
+    a.kdf == b.kdf
+        && a.salt == b.salt
+        && a.m_cost == b.m_cost
+        && a.t_cost == b.t_cost
+        && a.p_cost == b.p_cost
+        && serde_json::to_string(&a.verifier).ok() == serde_json::to_string(&b.verifier).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crypto::{self, KdfParams, MasterKey};
+    fn init(db: &Database, key: &MasterKey) {
+        db.run_initial_encryption(
+            key,
+            &KdfParams::new_random(),
+            &crypto::make_verifier(key).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn unrelated_vault_is_rejected_without_changing_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Database::new(dir.path().join("a.db")).unwrap();
+        let second = Database::new(dir.path().join("b.db")).unwrap();
+        init(&first, &MasterKey([1; 32]));
+        init(&second, &MasterKey([2; 32]));
+        let original = load_vault_meta(&first).unwrap();
+        assert!(apply_vault_meta_if_newer(
+            &first,
+            &load_vault_meta(&second).unwrap().unwrap(),
+            &original
+        )
+        .is_err());
+        assert_eq!(
+            vault_meta_hash(&load_vault_meta(&first).unwrap().unwrap()),
+            vault_meta_hash(&original.unwrap())
+        );
+        assert!(first.get_pending_rotation().unwrap().is_none());
+    }
+
+    #[test]
+    fn rotation_is_staged_before_any_ciphertext_is_imported() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = Database::new(dir.path().join("a.db")).unwrap();
+        let second = Database::new(dir.path().join("b.db")).unwrap();
+        let old = MasterKey([1; 32]);
+        let new = MasterKey([2; 32]);
+        init(&first, &old);
+        let meta = load_vault_meta(&first).unwrap().unwrap();
+        second.set_vault_meta_wire(&meta).unwrap();
+        let (kdf, verifier) = first.get_vault_meta().unwrap().unwrap();
+        first
+            .run_rekey(
+                &old,
+                &new,
+                &KdfParams::new_random(),
+                &crypto::make_verifier(&new).unwrap(),
+                &kdf,
+                &verifier,
+            )
+            .unwrap();
+        let rotated = load_vault_meta(&first).unwrap().unwrap();
+        assert!(apply_vault_meta_if_newer(&second, &rotated, &Some(meta.clone())).is_err());
+        assert!(second.get_pending_rotation().unwrap().is_some());
+        assert!(same_vault_key(
+            &load_vault_meta(&second).unwrap().unwrap(),
+            &meta
+        ));
+        let recovered = crate::vault::apply_pending_rotation(&second, &old)
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.0, new.0);
+        assert!(same_vault_key(
+            &load_vault_meta(&second).unwrap().unwrap(),
+            &rotated
+        ));
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::crypto::{self, KdfParams, MasterKey};
+    use crate::sync::transport::MobileSession;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn full_sync_handles_large_grouped_data_and_fresh_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Database::new(dir.path().join("source.db")).unwrap();
+        let target = Database::new(dir.path().join("target.db")).unwrap();
+        source
+            .run_initial_encryption(
+                &MasterKey([1; 32]),
+                &KdfParams::new_random(),
+                &crypto::make_verifier(&MasterKey([1; 32])).unwrap(),
+            )
+            .unwrap();
+        let mut rows = vec![Row {
+            table: "groups".into(),
+            row: json!({"id":"folder", "name":"Folder", "created_at":"2026-01-01"}),
+        }];
+        for index in 0..200 {
+            rows.push(Row {
+                table: "snippets".into(),
+                row: json!({
+                    "id":format!("snippet-{index}"), "label":"Snippet", "command":"x".repeat(2000),
+                    "group_id":"folder", "tags":"[]", "connection_ids":"[]", "sort_order":0,
+                    "created_at":"2026-01-01", "updated_at":"2026-01-01"
+                }),
+            });
+        }
+        source.sync_apply_rows(&rows).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            run_sync_mobile(
+                &mut stream,
+                &mut MobileSession::new([9; 32]),
+                &source,
+                "Source",
+            )
+            .await
+            .unwrap()
+        };
+        let client = async {
+            let mut stream = TcpStream::connect(address).await.unwrap();
+            run_sync_mobile(
+                &mut stream,
+                &mut MobileSession::new([9; 32]),
+                &target,
+                "Target",
+            )
+            .await
+            .unwrap()
+        };
+        let (sent, received) = tokio::join!(server, client);
+        assert_eq!(sent.pushed, 201);
+        assert_eq!(received.pulled, 201);
+        assert_eq!(target.get_all_snippets().unwrap().len(), 200);
+        assert_eq!(target.get_all_groups().unwrap().len(), 1);
+        assert!(same_vault_key(
+            &load_vault_meta(&source).unwrap().unwrap(),
+            &load_vault_meta(&target).unwrap().unwrap()
+        ));
     }
 }

@@ -159,8 +159,22 @@ function showProgressOverlay(title, filename) {
                 <span class="sftp-transfer-percent">0%</span>
                 <span class="sftp-transfer-bytes">0 B</span>
             </div>
+            <button class="btn btn-secondary" data-cancel-transfer>Cancel transfer</button>
         </div>
     `;
+    overlay.querySelector('[data-cancel-transfer]').addEventListener('click', async (event) => {
+        event.currentTarget.disabled = true;
+        event.currentTarget.textContent = 'Cancelling…';
+        const transferId = currentTransferId;
+        try {
+            // A worker may still be queued when Cancel is clicked. Keep the
+            // cancellation request active until that transfer settles.
+            while (currentTransferId === transferId && transferId) {
+                await api.sftpCancelTransfer(transferId);
+                await new Promise(resolve => setTimeout(resolve, 200));
+            }
+        } catch (error) { showToast(`Cancel failed: ${error}`, 'error'); }
+    });
 }
 
 function updateProgressOverlay(percentage, bytesTransferred, totalBytes) {
@@ -359,10 +373,20 @@ function handleOpenWith(side, entry) {
     showToast('Open with external application is not yet supported', 'info');
 }
 
-function handleCopyToTarget(side, entry) {
+async function handleCopyToTarget(side, entry) {
     if (!entry || !sessionId || activeTransfers > 0) return;
     const targetSide = side === 'local' ? 'remote' : 'local';
     const targetPath = state[targetSide].path;
+    const exists = state[targetSide].entries.some(item => item.name === entry.name);
+    let overwrite = false;
+    if (exists) {
+        overwrite = await showConfirm({ title: 'Replace existing files?',
+            message: entry.is_dir
+                ? `Merge "${entry.name}" and replace matching files? Completed files remain if the transfer is cancelled.`
+                : `Replace "${entry.name}" in the destination?`,
+            confirmText: 'Replace', danger: true });
+        if (!overwrite || !sessionId || activeTransfers > 0) return;
+    }
     const label = side === 'local' ? 'Uploading' : 'Downloading';
     const transferId = generateId();
     currentTransferId = transferId;
@@ -373,11 +397,11 @@ function handleCopyToTarget(side, entry) {
         try {
             const dest = joinPath(targetPath, entry.name);
             if (entry.is_dir) {
-                if (side === 'local') await api.sftpUploadDir(sessionId, entry.path, dest, transferId);
-                else await api.sftpDownloadDir(sessionId, entry.path, dest, transferId);
+                if (side === 'local') await api.sftpUploadDir(sessionId, entry.path, dest, transferId, overwrite);
+                else await api.sftpDownloadDir(sessionId, entry.path, dest, transferId, overwrite);
             } else {
-                if (side === 'local') await api.sftpUpload(sessionId, entry.path, dest, transferId);
-                else await api.sftpDownload(sessionId, entry.path, dest, transferId);
+                if (side === 'local') await api.sftpUpload(sessionId, entry.path, dest, transferId, overwrite);
+                else await api.sftpDownload(sessionId, entry.path, dest, transferId, overwrite);
             }
             await new Promise(r => setTimeout(r, 300));
             showToast(`"${entry.name}" transferred`, 'success');
@@ -722,10 +746,22 @@ async function connectToHost(conn) {
     const statusEl = container.querySelector('.sftp-connect-state');
     if (statusEl) statusEl.innerHTML = '<div class="sftp-loading">Connecting…</div>';
     try {
-        const home = await api.sftpConnect({
+        const params = {
             session_id: sid, host: conn.host, port: conn.port,
             username: conn.username, password: conn.password ?? null, key_id: conn.key_id ?? null,
-        });
+        };
+        let home;
+        try { home = await api.sftpConnect(params); }
+        catch (error) {
+            let detail;
+            try { detail = JSON.parse(String(error)); } catch { throw error; }
+            if (detail.code !== 'unknown_host_key') throw error;
+            const accepted = await showConfirm({ title: 'Trust this SSH server?',
+                message: `This host key for ${detail.host}:${detail.port} is not trusted yet. Verify this fingerprint independently: ${detail.fingerprint}`,
+                confirmText: 'Trust and connect' });
+            if (!accepted) throw new Error('Connection cancelled');
+            home = await api.sftpConnect({ ...params, trusted_fingerprint: detail.fingerprint });
+        }
         sessionId = sid;
         showHidden = { local: false, remote: false };
         filterQuery = { local: '', remote: '' };

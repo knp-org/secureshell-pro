@@ -4,8 +4,7 @@ use tauri::{AppHandle, State};
 use crate::ssh::SshManager;
 use crate::vault::{maybe_decrypt_field, Vault};
 
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
 
 #[derive(Deserialize)]
 pub struct ConnectParams {
@@ -27,21 +26,24 @@ pub fn ssh_connect(
 ) -> Result<(), String> {
     let mut key_path_to_use = None;
 
-    // If key_id is provided, fetch from DB and write to a secure temp file
-    if let Some(key_id) = &params.key_id {
-        if !key_id.is_empty() {
-            let keys = db.get_all_keys()?;
-            if let Some(key) = keys.into_iter().find(|k| k.id == *key_id) {
-                let decrypted = maybe_decrypt_field(key.private_key, &vault, &key.id)?;
-                if let Some(priv_key) = decrypted {
-                    let tmp_path = std::env::temp_dir().join(format!("ssp_key_{}", uuid::Uuid::new_v4()));
-                    std::fs::write(&tmp_path, priv_key).map_err(|e| e.to_string())?;
-                    #[cfg(unix)]
-                    std::fs::set_permissions(&tmp_path, std::fs::Permissions::from_mode(0o600)).map_err(|e| e.to_string())?;
-                    key_path_to_use = Some(tmp_path);
-                }
-            }
-        }
+    if let Some(key_id) = params.key_id.as_ref().filter(|s| !s.is_empty()) {
+        let key = db
+            .get_all_keys()?
+            .into_iter()
+            .find(|k| &k.id == key_id)
+            .ok_or("SSH key not found")?;
+        let private_key = zeroize::Zeroizing::new(
+            maybe_decrypt_field(key.private_key, &vault, &key.id)?.ok_or("SSH key is empty")?,
+        );
+        // NamedTempFile creates a private file atomically and removes it on every failure path.
+        let mut file = tempfile::Builder::new()
+            .prefix("ssp-key-")
+            .tempfile()
+            .map_err(|e| e.to_string())?;
+        file.write_all(private_key.as_bytes())
+            .map_err(|e| e.to_string())?;
+        file.flush().map_err(|e| e.to_string())?;
+        key_path_to_use = Some(file);
     }
 
     ssh.connect(
@@ -70,12 +72,21 @@ pub fn local_shell_connect(
 }
 
 #[tauri::command]
-pub fn ssh_write(ssh: State<'_, SshManager>, session_id: String, data: String) -> Result<(), String> {
+pub fn ssh_write(
+    ssh: State<'_, SshManager>,
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
     ssh.write(&session_id, data.as_bytes())
 }
 
 #[tauri::command]
-pub fn ssh_resize(ssh: State<'_, SshManager>, session_id: String, rows: u16, cols: u16) -> Result<(), String> {
+pub fn ssh_resize(
+    ssh: State<'_, SshManager>,
+    session_id: String,
+    rows: u16,
+    cols: u16,
+) -> Result<(), String> {
     ssh.resize(&session_id, rows, cols)
 }
 
