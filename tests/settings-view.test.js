@@ -62,7 +62,7 @@ before(async () => {
 });
 
 test('every control bindEvents touches is wired, not just the first', () => {
-    for (const id of ['set-change-pwd', 'set-pair-device', 'set-join-device']) {
+    for (const id of ['set-change-pwd', 'set-pair-device', 'set-join-device', 'set-reset-vault']) {
         assert.ok(document.getElementById(id), `${id} missing from the rendered view`);
     }
     // Reached only if bindEvents ran past its listener block.

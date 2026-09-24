@@ -759,6 +759,33 @@ impl Database {
         Ok(())
     }
 
+    /// Forget the master password and everything it protected, returning the
+    /// device to its first-run state.
+    ///
+    /// Connections and SSH keys are **hard** deleted rather than tombstoned.
+    /// Every synced table carries `deleted_at`, so a soft delete here would
+    /// replicate as "the user deleted these" and destroy the same records on
+    /// the paired device. A hard delete simply leaves this device's index
+    /// empty, and the next sync pulls the rows back from the peer.
+    ///
+    /// Snippets and groups hold no secrets and are left alone. Returns the
+    /// path of the backup taken before anything was touched.
+    pub fn reset_vault(&self) -> Result<PathBuf, String> {
+        let backup = self.backup_to_sibling()?;
+        let mut conn = self.conn.lock().map_err(|e| e.to_string())?;
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        for statement in [
+            "DELETE FROM connections",
+            "DELETE FROM ssh_keys",
+            "DELETE FROM vault_meta",
+            "DELETE FROM pending_vault_rotation",
+        ] {
+            tx.execute(statement, []).map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(backup)
+    }
+
     // ─── Pending rotation (received over sync, awaiting key migration) ──
 
     pub fn set_pending_rotation(

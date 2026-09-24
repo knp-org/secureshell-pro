@@ -74,6 +74,7 @@ export async function vaultStatus()        { return await invoke('vault_status')
 export async function vaultInit(password)  { return await invoke('vault_init',   { password }); }
 export async function vaultUnlock(password){ return await invoke('vault_unlock', { password }); }
 export async function vaultLock()          { return await invoke('vault_lock'); }
+export async function vaultReset()             { return await invoke('vault_reset'); }
 export async function vaultChangePassword(currentPassword, newPassword) {
     return await invoke('vault_change_password', { currentPassword, newPassword });
 }

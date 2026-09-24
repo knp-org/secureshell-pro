@@ -173,6 +173,24 @@ pub fn vault_lock(vault: State<'_, Vault>) -> Result<(), String> {
 /// Adopt a pending rotation while already unlocked (e.g. right after a sync).
 /// Returns `true` if a rotation was adopted. No-op when locked or nothing
 /// pending. The frontend can call this after a sync completes.
+/// Forget the master password and everything it protected, putting this
+/// device back into its first-run state so it can adopt another device's
+/// vault. Returns the path of the backup taken first.
+///
+/// Deliberately does not ask for the current password: the main reason to
+/// reach for this is that the password here is the wrong one — either
+/// forgotten, or set up before the user realised a second device has to adopt
+/// the first one's vault rather than match its password.
+#[tauri::command]
+pub fn vault_reset(
+    db: State<'_, Database>,
+    vault: State<'_, Vault>,
+) -> Result<String, String> {
+    let backup = db.reset_vault()?;
+    vault.clear();
+    Ok(backup.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub fn vault_apply_pending(
     db: State<'_, Database>,

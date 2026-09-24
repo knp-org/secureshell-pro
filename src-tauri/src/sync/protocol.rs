@@ -359,12 +359,7 @@ fn apply_vault_meta_if_newer(
 ) -> Result<(), String> {
     let Some(ours) = ours else {
         // Legacy plaintext must be migrated locally before adopting another vault.
-        if db
-            .get_all_connections()?
-            .iter()
-            .any(|c| c.password.is_some())
-            || db.get_all_keys()?.iter().any(|k| k.private_key.is_some())
-        {
+        if holds_secrets(db)? {
             return Err("Initialize the local vault before syncing existing credentials".into());
         }
         return db.set_vault_meta_wire(incoming);
@@ -395,7 +390,28 @@ fn apply_vault_meta_if_newer(
     {
         return Err("The peer must lock and unlock its vault to adopt the password rotation, then sync again.".into());
     }
-    Err("These devices use different vault keys. Sync stopped without importing credentials. Pair a fresh vault or restore a shared vault backup first.".into())
+    // Different keys, but this device is protecting nothing of its own: every
+    // vault gets a fresh random salt, so a second device whose owner typed the
+    // same master password still lands here. Refusing would make a new device
+    // impossible to set up, since the unlock gate forces a vault to exist
+    // before the app will even open. With no local secrets to orphan, adopting
+    // the peer's vault is safe.
+    if !holds_secrets(db)? {
+        db.set_vault_meta_wire(incoming)?;
+        return Err("Adopted the other device's vault. Unlock with that device's master password, then sync again.".into());
+    }
+
+    Err("These devices use different vault keys, and this device has credentials of its own that would be orphaned. Sync stopped without importing anything. Use Settings → Security → Reset vault on the device that should receive the credentials, then sync again.".into())
+}
+
+/// Whether this device holds any secret that a vault key protects. Used to
+/// decide if its vault can be replaced without stranding data.
+fn holds_secrets(db: &Database) -> Result<bool, String> {
+    Ok(db
+        .get_all_connections()?
+        .iter()
+        .any(|c| c.password.is_some())
+        || db.get_all_keys()?.iter().any(|k| k.private_key.is_some()))
 }
 
 fn same_vault_key(a: &VaultMetaWire, b: &VaultMetaWire) -> bool {
@@ -420,6 +436,27 @@ mod tests {
         .unwrap();
     }
 
+    fn with_saved_password(db: &Database) {
+        db.save_connection(&crate::db::models::Connection {
+            id: "c1".into(),
+            name: "prod".into(),
+            host: "10.0.0.2".into(),
+            port: 22,
+            username: "root".into(),
+            auth_method: "password".into(),
+            password: Some("{\"v\":1,\"ct\":\"...\"}".into()),
+            key_id: None,
+            group_id: None,
+            tags: vec![],
+            color: None,
+            last_connected: None,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            synced: false,
+        })
+        .unwrap();
+    }
+
     #[test]
     fn unrelated_vault_is_rejected_without_changing_metadata() {
         let dir = tempfile::tempdir().unwrap();
@@ -427,6 +464,9 @@ mod tests {
         let second = Database::new(dir.path().join("b.db")).unwrap();
         init(&first, &MasterKey([1; 32]));
         init(&second, &MasterKey([2; 32]));
+        // Only a device with credentials of its own refuses outright — those
+        // are what a swapped vault key would strand.
+        with_saved_password(&first);
         let original = load_vault_meta(&first).unwrap();
         assert!(apply_vault_meta_if_newer(
             &first,
@@ -477,6 +517,51 @@ mod tests {
             &load_vault_meta(&second).unwrap().unwrap(),
             &rotated
         ));
+    }
+
+    /// A second device cannot avoid having a vault: the unlock gate makes one
+    /// before the app opens, with its own random salt, so its key differs even
+    /// when its owner typed the same master password. With nothing of its own
+    /// to strand it adopts the peer's vault instead of deadlocking setup.
+    #[test]
+    fn a_device_with_no_credentials_adopts_the_peers_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Database::new(dir.path().join("a.db")).unwrap();
+        let fresh = Database::new(dir.path().join("b.db")).unwrap();
+        init(&source, &MasterKey([1; 32]));
+        with_saved_password(&source);
+        init(&fresh, &MasterKey([2; 32]));
+
+        let incoming = load_vault_meta(&source).unwrap().unwrap();
+        let ours = load_vault_meta(&fresh).unwrap();
+        let error = apply_vault_meta_if_newer(&fresh, &incoming, &ours)
+            .expect_err("adoption stops this sync so the user can re-unlock");
+        assert!(error.contains("Unlock with that device's master password"), "{error}");
+
+        // The peer's vault is now this device's vault, so the next sync matches.
+        let adopted = load_vault_meta(&fresh).unwrap().unwrap();
+        assert!(same_vault_key(&adopted, &incoming));
+        assert!(apply_vault_meta_if_newer(&fresh, &incoming, &Some(adopted)).is_ok());
+        assert!(fresh.get_pending_rotation().unwrap().is_none());
+    }
+
+    /// Reset clears the vault and the secrets it protected, without leaving
+    /// tombstones that would replicate the deletion back to the other device.
+    #[test]
+    fn reset_vault_clears_secrets_without_tombstoning_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::new(dir.path().join("a.db")).unwrap();
+        init(&db, &MasterKey([1; 32]));
+        with_saved_password(&db);
+        assert_eq!(db.sync_index_table("connections").unwrap().len(), 1);
+
+        let backup = db.reset_vault().unwrap();
+        assert!(backup.exists(), "a backup is taken before anything is removed");
+        assert!(load_vault_meta(&db).unwrap().is_none());
+        assert!(db.get_all_connections().unwrap().is_empty());
+        // Nothing left in the index at all — a tombstone here would tell the
+        // peer to delete its copy.
+        assert!(db.sync_index_table("connections").unwrap().is_empty());
     }
 }
 
@@ -548,4 +633,5 @@ mod integration_tests {
             &load_vault_meta(&target).unwrap().unwrap()
         ));
     }
+
 }

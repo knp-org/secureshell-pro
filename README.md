@@ -28,6 +28,7 @@ A private, local-first desktop SSH workspace for managing remote hosts, private 
 
 - **Vault encryption** — All sensitive credentials (passwords, private keys, passphrases) are encrypted at rest using **AES-256-GCM** with keys derived from a master password via **Argon2id**.
 - **Credential handling** — Saved credentials are encrypted in the vault. SFTP reads keys directly from memory. Terminal SSH uses an automatically cleaned-up private temporary key file for the system OpenSSH client; abrupt process termination may leave that file behind. Locking the vault clears the in-memory master key.
+- **Vault reset** — **Settings → Security → Reset vault** forgets the master password and the credentials it protects, so a device can adopt a paired device's vault. A database backup is written first, and it asks you to type `RESET`.
 - **Master password rotation** — Change your master password at any time from **Settings → Security**. After verifying the current password, every stored secret is re-encrypted under a freshly derived key in a single atomic transaction, with a consistent SQLite backup taken beforehand. Rotation stops if the backup fails.
 - **LAN sync** — Pairing uses **X25519 key exchange** and **Noise protocol** for encrypted peer-to-peer communication. Mobile peers authenticate via **HMAC-SHA256 challenge-response**. No cloud relay or hosted service is involved.
 - **Local-first** — All connection data stays on the device by default. Nothing leaves the machine unless you explicitly pair and sync.
@@ -162,6 +163,6 @@ SFTP checks `~/.ssh/known_hosts`, prompts for unknown fingerprints, and rejects 
 
 Terminal password and key-passphrase authentication uses OpenSSH's askpass support, without `sshpass`. Windows local terminals use `COMSPEC` (normally `cmd.exe`).
 
-Sync rejects unrelated vault keys before importing credentials. When a password rotation arrives, lock and unlock the receiving vault, then sync again. Large messages use the negotiated `chunks-v1` capability with a 16 MiB message limit; older peers continue using single frames and must be updated for larger datasets. The Android companion needs matching capability support to use chunked messages.
+Sync rejects unrelated vault keys before importing credentials. Two devices must share one vault, not merely the same password — every vault has its own salt, so a device that already set up a master password adopts the peer's vault on first sync (and is asked to unlock with the peer's password) unless it holds credentials of its own, in which case reset it first. When a password rotation arrives, lock and unlock the receiving vault, then sync again. Large messages use the negotiated `chunks-v1` capability with a 16 MiB message limit; older peers continue using single frames and must be updated for larger datasets. The Android companion needs matching capability support to use chunked messages.
 
 Backups are private SQLite snapshots. Backups created before migrating a legacy plaintext vault can contain plaintext credentials and should be handled accordingly.

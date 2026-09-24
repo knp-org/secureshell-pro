@@ -15,7 +15,7 @@ import {
     renderAccentSwatches,
 } from '../utils/accent-themes.js';
 import * as api      from '../api.js';
-import { showConfirm } from '../components/modal.js';
+import { showConfirm, showPrompt } from '../components/modal.js';
 
 // ─── Section builders ──────────────────────────────────────
 
@@ -52,6 +52,16 @@ function securitySection() {
                     <span class="desc">Protect your encrypted keystore</span>
                 </div>
                 <button class="btn btn-secondary btn-sm" id="set-change-pwd">Change Password</button>
+            </div>
+            <div class="setting-row">
+                <div class="setting-label">
+                    <span class="title">Reset vault</span>
+                    <span class="desc">
+                        Forget the master password and the credentials it protects. Use this on a
+                        device that should receive another device's vault over sync.
+                    </span>
+                </div>
+                <button class="btn btn-danger btn-sm" id="set-reset-vault">Reset vault</button>
             </div>
         </div>`;
 }
@@ -112,6 +122,7 @@ async function bindEvents() {
     document.getElementById('set-change-pwd')?.addEventListener('click', openChangePasswordModal);
     document.getElementById('set-pair-device')?.addEventListener('click', openPairingModal);
     document.getElementById('set-join-device')?.addEventListener('click', openJoinModal);
+    document.getElementById('set-reset-vault')?.addEventListener('click', resetVault);
     refreshPeers();
 
     const versionEl = document.getElementById('app-version');
@@ -438,6 +449,36 @@ async function awaitPairingOutcome(overlay, { poll = true } = {}) {
         } else if (s.state === 'connecting') {
             statusEl.textContent = `Connecting to ${s.host}…`;
         }
+    }
+}
+
+/// Clears this device's vault so it can adopt a paired device's one.
+///
+/// Destructive and not undoable in the UI, so it asks the user to type the
+/// word rather than click once. The backend takes a database backup before
+/// touching anything and returns its path, which we show.
+async function resetVault() {
+    const typed = await showPrompt({
+        title: 'Reset vault',
+        message: 'Deletes the master password, every saved connection and every SSH key on THIS '
+               + 'device. Snippets and groups are kept, and a database backup is written first. '
+               + 'Type RESET to confirm.',
+        placeholder: 'RESET',
+        confirmText: 'Reset vault',
+    });
+    if (typed === null) return;
+    if (typed.trim().toUpperCase() !== 'RESET') {
+        showToast('Reset cancelled — the confirmation did not match', 'error');
+        return;
+    }
+    try {
+        const backup = await api.vaultReset();
+        showToast(`Vault reset. Backup saved to ${backup}`, 'success');
+        // The vault gate decides what to show from the vault's state at boot,
+        // so reload rather than trying to unwind the current session.
+        setTimeout(() => window.location.reload(), 1800);
+    } catch (err) {
+        showToast('Reset failed: ' + err, 'error');
     }
 }
 
