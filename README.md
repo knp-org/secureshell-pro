@@ -1,9 +1,9 @@
 # 🛡️ SecureShell Pro
 
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-blue.svg)](LICENSE)
-[![Platform: Linux · Windows](https://img.shields.io/badge/Platform-Linux%20·%20Windows-informational)]()
+[![Platform: Linux · Windows · macOS](https://img.shields.io/badge/Platform-Linux%20·%20Windows%20·%20macOS-informational)]()
 [![Built with Tauri 2](https://img.shields.io/badge/Built%20with-Tauri%202-ffc131?logo=tauri&logoColor=white)]()
-[![Version](https://img.shields.io/badge/Version-1.3.2-brightgreen)](https://github.com/knp-org/secureshell-pro/releases)
+[![Version](https://img.shields.io/badge/Version-1.4.0-brightgreen)](https://github.com/knp-org/secureshell-pro/releases)
 
 A private, local-first desktop SSH workspace for managing remote hosts, private keys, reusable command snippets, terminal sessions, SFTP file transfers, and encrypted LAN sync — all without a cloud account.
 
@@ -69,6 +69,9 @@ npm run build:deb
 # AppImage
 npm run build:appimage
 
+# macOS (.dmg, universal — run on a Mac)
+npm run build:dmg
+
 # All targets
 npm run build:all
 ```
@@ -105,7 +108,7 @@ secureshell-pro/
 │   │   └── sync/               # LAN discovery, pairing, peer sync
 │   ├── Cargo.toml
 │   └── tauri.conf.json
-├── .github/workflows/          # CI: build & release (Linux .deb + Windows .exe)
+├── .github/workflows/          # CI: build & release (Linux .deb, Windows .exe, macOS .dmg)
 └── package.json
 ```
 
@@ -131,7 +134,11 @@ Pushing a version tag (`v*`) triggers the GitHub Actions workflow which:
 
 1. Builds a `.deb` package on Ubuntu 22.04
 2. Builds a `.exe` (NSIS installer) on Windows
-3. Creates a draft GitHub Release with both artifacts attached
+3. Builds a universal `.dmg` (Apple Silicon + Intel) on macOS 14
+4. Creates a draft GitHub Release with all three artifacts attached
+
+The `.dmg` is unsigned and unnotarized, so first launch on macOS needs
+Control-click → Open, or `xattr -dr com.apple.quarantine "/Applications/SecureShell Pro.app"`.
 
 ---
 
